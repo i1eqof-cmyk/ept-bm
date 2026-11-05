@@ -1,0 +1,17 @@
+{
+  "name": "global-ept-browser-benchmark",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "laz-perf": "0.0.7"
+  },
+  "devDependencies": {
+    "vite": "^6.4.1"
+  }
+}
