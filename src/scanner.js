@@ -17,10 +17,16 @@ import {
   listenToOwnerAuth,
   prepareScannedCandidates,
   saveScannedCandidates,
+  removePreviouslyRemovedCandidates,
+  setForestRunnerCandidatesRemoved,
   setCandidateRemoved,
   signInOwnerWithGoogle,
   signOutOwner,
 } from './candidate-reviews.js';
+import {
+  collectForestRunnerCandidates,
+  isForestRunnerCandidate,
+} from './forest-candidates.js';
 import {
   canManuallyRetry,
 } from '../functions/_lib/queue-control.js';
@@ -46,6 +52,7 @@ const elements = {
   ownerSignOut: document.querySelector('#owner-sign-out'),
   ownerAccountStatus: document.querySelector('#owner-account-status'),
   ownerPanelStatus: document.querySelector('#owner-panel-status'),
+  ownerClearForestCandidates: document.querySelector('#owner-clear-forest-candidates'),
   removedCandidateList: document.querySelector('#removed-candidate-list'),
   investigationServiceState: document.querySelector('#investigation-service-state'),
   investigationStatus: document.querySelector('#investigation-status'),
@@ -223,7 +230,17 @@ function restorePendingQueueLocally() {
 }
 
 function queueCandidateRecords(candidates) {
-  for (const candidate of candidates) {
+  const activeCandidates = reviewStoreReady
+    ? removePreviouslyRemovedCandidates(candidates, candidateReviews)
+    : candidates;
+  if (reviewStoreReady) {
+    for (const [id, candidate] of pendingQueueCandidates) {
+      if (!removePreviouslyRemovedCandidates([candidate], candidateReviews).length) {
+        pendingQueueCandidates.delete(id);
+      }
+    }
+  }
+  for (const candidate of activeCandidates) {
     if (
       candidate?.id &&
       !queuedCandidateIds.has(candidate.id) &&
@@ -232,14 +249,14 @@ function queueCandidateRecords(candidates) {
       pendingQueueCandidates.set(candidate.id, candidate);
     }
   }
-  if (pendingQueueCandidates.size) persistPendingQueueLocally();
+  if (pendingQueueCandidates.size || reviewStoreReady) persistPendingQueueLocally();
   return pendingQueueCandidates.size
     ? synchronizeInvestigationQueue()
     : Promise.resolve();
 }
 
 async function synchronizeInvestigationQueue() {
-  if (queueSyncRunning || !pendingQueueCandidates.size) return;
+  if (queueSyncRunning || !reviewStoreReady || !pendingQueueCandidates.size) return;
   queueSyncRunning = true;
   if (queueRetryTimer) {
     window.clearTimeout(queueRetryTimer);
@@ -1178,6 +1195,13 @@ function renderOwnerPanel() {
   const owner = isReviewOwner(currentUser);
   elements.ownerSignIn.hidden = owner;
   elements.ownerSignOut.hidden = !owner;
+  elements.ownerClearForestCandidates.hidden = !owner;
+  const forestCandidates = collectForestRunnerCandidates(candidateReviews, candidateSubmissions);
+  elements.ownerClearForestCandidates.textContent = forestCandidates.length
+    ? `Remove ${formatCount(forestCandidates.length)} old Forest Runner candidate(s)`
+    : 'Remove old Forest Runner candidates';
+  elements.ownerClearForestCandidates.disabled =
+    !owner || !reviewStoreReady || candidateStoreUnavailable;
   if (owner) {
     elements.ownerAccountStatus.textContent =
       `Owner signed in${currentUser.displayName ? ` as ${currentUser.displayName}` : ''}.`;
@@ -1650,6 +1674,45 @@ elements.ownerSignOut.addEventListener('click', async () => {
     elements.ownerPanelStatus.textContent = `Sign-out failed: ${error.message}`;
   } finally {
     elements.ownerSignOut.disabled = false;
+  }
+});
+elements.ownerClearForestCandidates.addEventListener('click', async () => {
+  const forestCandidates = collectForestRunnerCandidates(candidateReviews, candidateSubmissions);
+  const confirmation =
+    `Remove ${forestCandidates.length} old Forest Runner candidate location(s) from the shared map and delete their ` +
+    'still-pending investigation records? The queue will be stopped. Completed investigation history is retained.';
+  if (!window.confirm(confirmation)) return;
+
+  elements.ownerClearForestCandidates.disabled = true;
+  elements.ownerPanelStatus.textContent = 'Removing old Forest Runner candidates…';
+  try {
+    const removedRecords = await setForestRunnerCandidatesRemoved(
+      candidateReviews,
+      candidateSubmissions,
+    );
+    const removedById = new Map(removedRecords.map((record) => [record.id, record]));
+    candidateReviews = [
+      ...candidateReviews.filter((review) => !removedById.has(review.id)),
+      ...removedRecords,
+    ];
+    for (const [id, candidate] of pendingQueueCandidates) {
+      if (isForestRunnerCandidate(candidate)) pendingQueueCandidates.delete(id);
+    }
+    persistPendingQueueLocally();
+    renderCandidateLayers();
+    renderRemovedReviews();
+
+    const result = await investigationApi('POST', { action: 'clearForestRunnerBacklog' });
+    elements.ownerPanelStatus.textContent =
+      `Removed ${formatCount(removedRecords.length)} old Forest Runner location(s) and ` +
+      `${formatCount(result.deletedCount)} pending investigation(s). The queue is stopped; completed history was retained.`;
+    setInvestigationError('');
+    await refreshInvestigationData();
+  } catch (error) {
+    elements.ownerPanelStatus.textContent =
+      `Forest Runner cleanup was incomplete: ${error.message}. Refresh and retry; removed locations stay hidden.`;
+  } finally {
+    renderOwnerPanel();
   }
 });
 

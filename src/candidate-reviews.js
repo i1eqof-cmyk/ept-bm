@@ -7,6 +7,7 @@ import {
 } from '@firebase/auth';
 import { onValue, ref, update } from '@firebase/database';
 import { firebaseAuth, firebaseDatabase, OWNER_UID } from './firebase.js';
+import { collectForestRunnerCandidates } from './forest-candidates.js';
 
 const REVIEW_PATH = 'candidateReviews';
 const SCAN_PATH = 'scanCandidates';
@@ -332,6 +333,35 @@ export async function setCandidateRemoved(review, removed) {
   record.removed = removed;
   record.updatedAt = Date.now();
   await update(ref(firebaseDatabase, `${REVIEW_PATH}/${review.id}`), record);
+}
+
+export async function setForestRunnerCandidatesRemoved(reviews, submissions) {
+  if (!isReviewOwner(firebaseAuth.currentUser)) {
+    throw new Error('Only the configured owner can change shared candidate reviews.');
+  }
+  const targets = collectForestRunnerCandidates(reviews, submissions);
+  const reviewIds = new Set(reviews.map((review) => review.id));
+  const removedRecords = targets.map((candidate) => {
+    const record = toReviewRecord(candidate, candidate.id, candidate);
+    record.removed = true;
+    record.updatedAt = Date.now();
+    return record;
+  });
+
+  for (let offset = 0; offset < removedRecords.length; offset += 50) {
+    const batch = removedRecords.slice(offset, offset + 50);
+    const writes = {};
+    for (const record of batch) {
+      if (reviewIds.has(record.id)) {
+        writes[`${record.id}/removed`] = true;
+        writes[`${record.id}/updatedAt`] = record.updatedAt;
+      } else {
+        writes[record.id] = record;
+      }
+    }
+    await update(ref(firebaseDatabase, REVIEW_PATH), writes);
+  }
+  return removedRecords;
 }
 
 export function removePreviouslyRemovedCandidates(candidates, reviews) {
