@@ -61,6 +61,17 @@ export default defineConfig({
   },
   build: {
     target: 'es2022',
+    rollupOptions: {
+      input: {
+        main: resolve(projectRoot, 'index.html'),
+        benchmark: resolve(projectRoot, 'advanced-benchmark.html'),
+      },
+      output: {
+        manualChunks(id) {
+          if (id.includes('/node_modules/@firebase/')) return 'firebase';
+        },
+      },
+    },
   },
   server: {
     host: '127.0.0.1',

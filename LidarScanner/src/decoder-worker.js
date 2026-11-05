@@ -1,5 +1,6 @@
 import { createLazPerf } from 'laz-perf';
 import wasmUrl from 'laz-perf/lib/web/laz-perf.wasm?url';
+import proj4 from 'proj4';
 
 let lazPerfPromise;
 let cancelled = false;
@@ -53,6 +54,15 @@ function readLasHeader(buffer) {
   };
 }
 
+function configureProjection(job) {
+  if (job.sourceWkt) {
+    proj4.defs('EPT_SOURCE', job.sourceWkt);
+    return 'EPT_SOURCE';
+  }
+  if (job.sourceCrs) return job.sourceCrs;
+  throw new Error('EPT metadata has no usable horizontal CRS definition.');
+}
+
 async function decodeNode(job) {
   const downloadStarted = performance.now();
   activeController = new AbortController();
@@ -91,6 +101,9 @@ async function decodeNode(job) {
     const positions = new Float32Array(pointCount * 3);
     const classifications = new Uint8Array(pointCount);
     const pointClassOffset = pointFormat >= 6 ? 16 : 15;
+    const sourceProjection = job.geographicBounds
+      ? configureProjection(job)
+      : null;
     pointPointer = module._malloc(recordLength);
     let insideCount = 0;
     let minZ = Infinity;
@@ -117,10 +130,28 @@ async function decodeNode(job) {
         y >= job.bounds.minY &&
         y <= job.bounds.maxY
       ) {
+        let outputX = x - job.centerX;
+        let outputY = y - job.centerY;
+        if (job.geographicBounds) {
+          const [longitude, latitude] = proj4(sourceProjection, 'EPSG:4326', [x, y]);
+          const bounds = job.geographicBounds;
+          if (
+            longitude < bounds.west ||
+            longitude > bounds.east ||
+            latitude < bounds.south ||
+            latitude > bounds.north
+          ) {
+            continue;
+          }
+          const longitudeScale =
+            111_319.49079327358 * Math.cos((job.displayCenter.latitude * Math.PI) / 180);
+          outputX = (longitude - job.displayCenter.longitude) * longitudeScale;
+          outputY = (latitude - job.displayCenter.latitude) * 111_319.49079327358;
+        }
         const outputIndex = insideCount * 3;
-        positions[outputIndex] = x - job.centerX;
-        positions[outputIndex + 1] = y - job.centerY;
-        positions[outputIndex + 2] = z - header.offset[2];
+        positions[outputIndex] = outputX;
+        positions[outputIndex + 1] = outputY;
+        positions[outputIndex + 2] = z;
         classifications[insideCount] = classification;
         insideCount += 1;
         minZ = Math.min(minZ, z);
@@ -139,6 +170,7 @@ async function decodeNode(job) {
       pointFormat,
       recordLength,
       compressedBytes: compressed.byteLength,
+      requestCount: 1,
       downloadMs: Number(downloadMs.toFixed(2)),
       decodeMs: Number((performance.now() - decodeStarted).toFixed(2)),
       minZ: insideCount ? minZ : null,
