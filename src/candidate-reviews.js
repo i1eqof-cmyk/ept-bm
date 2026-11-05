@@ -76,6 +76,12 @@ function normalizeReview(id, value) {
     dimensions: {
       widthMeters: value.dimensions.widthMeters,
       lengthMeters: value.dimensions.lengthMeters,
+      areaSquareMeters: isFiniteNumber(value.dimensions.areaSquareMeters)
+        ? value.dimensions.areaSquareMeters
+        : null,
+      aspectRatio: isFiniteNumber(value.dimensions.aspectRatio)
+        ? value.dimensions.aspectRatio
+        : null,
     },
     evidence: Array.isArray(value.evidence)
       ? value.evidence.filter((entry) => typeof entry === 'string').slice(0, 24)
@@ -84,6 +90,30 @@ function normalizeReview(id, value) {
       isFiniteNumber(value.class6Count) && value.class6Count >= 0
         ? Math.floor(value.class6Count)
         : 0,
+    classificationCounts:
+      value.classificationCounts && typeof value.classificationCounts === 'object'
+        ? Object.fromEntries(
+            Object.entries(value.classificationCounts)
+              .filter(([, count]) => isFiniteNumber(count) && count >= 0)
+              .map(([classification, count]) => [classification, Math.floor(count)]),
+          )
+        : null,
+    class6Share: isFiniteNumber(value.class6Share)
+      ? value.class6Share
+      : null,
+    vegetationShare: isFiniteNumber(value.vegetationShare)
+      ? value.vegetationShare
+      : null,
+    groundCoverage: isFiniteNumber(value.groundCoverage)
+      ? value.groundCoverage
+      : null,
+    planarCoverage: isFiniteNumber(value.planarCoverage)
+      ? value.planarCoverage
+      : null,
+    medianRoughness: isFiniteNumber(value.medianRoughness)
+      ? value.medianRoughness
+      : null,
+    density: isFiniteNumber(value.density) ? value.density : null,
     relativeHeightUnits: isFiniteNumber(value.relativeHeightUnits)
       ? value.relativeHeightUnits
       : null,
@@ -175,6 +205,11 @@ export async function ensureScanIdentity() {
   return credential.user;
 }
 
+export async function getScanIdToken() {
+  const user = await ensureScanIdentity();
+  return user.getIdToken();
+}
+
 export async function signOutOwner() {
   await signOut(firebaseAuth);
 }
@@ -224,36 +259,52 @@ function toReviewRecord(candidate, id, previous = null) {
     dimensions: {
       widthMeters: candidate.dimensions.widthMeters,
       lengthMeters: candidate.dimensions.lengthMeters,
+      areaSquareMeters: candidate.dimensions.areaSquareMeters,
+      aspectRatio: candidate.dimensions.aspectRatio,
     },
-    evidence: candidate.evidence.slice(0, 24),
+    evidence: Array.isArray(candidate.evidence)
+      ? candidate.evidence.slice(0, 24)
+      : [],
     class6Count: candidate.class6Count,
+    classificationCounts: candidate.classificationCounts || {},
+    class6Share: candidate.class6Share,
+    vegetationShare: candidate.vegetationShare,
+    groundCoverage: candidate.groundCoverage,
+    planarCoverage: candidate.planarCoverage,
+    medianRoughness: candidate.medianRoughness,
+    density: candidate.density,
     relativeHeightUnits: candidate.relativeHeightUnits,
     removed: previous?.removed ?? false,
     updatedAt: Date.now(),
   };
 }
 
-export async function saveScannedCandidates(candidates, reviews) {
-  const user = await ensureScanIdentity();
-  const writes = {};
+export function prepareScannedCandidates(candidates, reviews) {
   const visible = [];
+  const detected = [];
   const usedIds = new Set();
 
   for (const candidate of candidates) {
     const nearby = findNearbyReview(candidate, reviews);
-    if (nearby?.removed) continue;
     const id = nearby?.id ?? candidateId(candidate);
     if (usedIds.has(id)) continue;
-    const record = toReviewRecord(candidate, id);
+    const record = toReviewRecord(candidate, id, nearby);
     usedIds.add(id);
-    writes[id] = record;
-    visible.push(record);
+    detected.push(record);
+    if (!nearby?.removed) visible.push(record);
   }
+  return { detected, visible };
+}
 
-  if (Object.keys(writes).length) {
+export async function saveScannedCandidates(candidates, reviews) {
+  const user = await ensureScanIdentity();
+  const prepared = prepareScannedCandidates(candidates, reviews);
+  for (let offset = 0; offset < prepared.visible.length; offset += 50) {
+    const batch = prepared.visible.slice(offset, offset + 50);
+    const writes = Object.fromEntries(batch.map((record) => [record.id, record]));
     await update(ref(firebaseDatabase, `${SCAN_PATH}/${user.uid}`), writes);
   }
-  return { visible };
+  return prepared;
 }
 
 function normalizeScanCandidates(value) {

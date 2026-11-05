@@ -11,15 +11,19 @@ import {
 } from './scanner-engine.js';
 import {
   getCandidateMatch,
+  getScanIdToken,
   isReviewOwner,
   listenToCandidateReviews,
   listenToOwnerAuth,
-  removePreviouslyRemovedCandidates,
+  prepareScannedCandidates,
   saveScannedCandidates,
   setCandidateRemoved,
   signInOwnerWithGoogle,
   signOutOwner,
 } from './candidate-reviews.js';
+import {
+  canManuallyRetry,
+} from '../functions/_lib/queue-control.js';
 
 const elements = {
   searchForm: document.querySelector('#search-form'),
@@ -43,6 +47,16 @@ const elements = {
   ownerAccountStatus: document.querySelector('#owner-account-status'),
   ownerPanelStatus: document.querySelector('#owner-panel-status'),
   removedCandidateList: document.querySelector('#removed-candidate-list'),
+  investigationServiceState: document.querySelector('#investigation-service-state'),
+  investigationStatus: document.querySelector('#investigation-status'),
+  startInvestigationQueue: document.querySelector('#start-investigation-queue'),
+  stopInvestigationQueue: document.querySelector('#stop-investigation-queue'),
+  investigationCronStatus: document.querySelector('#investigation-cron-status'),
+  investigationCounts: document.querySelector('#investigation-counts'),
+  investigationQuota: document.querySelector('#investigation-quota'),
+  investigationError: document.querySelector('#investigation-error'),
+  investigationHistory: document.querySelector('#investigation-history'),
+  loadMoreInvestigations: document.querySelector('#load-more-investigations'),
 };
 
 const diagnostics = {
@@ -51,16 +65,24 @@ const diagnostics = {
   downloadedBytes: 0,
 };
 const MAX_SCAN_SIDE_METERS = 2000;
+const LOCAL_PENDING_QUEUE_KEY = 'lidar-investigation-pending-v1';
 let candidateReviews = [];
 let candidateSubmissions = [];
 let reviewStoreReady = false;
 let reviewStoreError = null;
 let currentUser = null;
-let currentCandidates = [];
-let currentCandidateCount = 0;
 let hasCandidateScan = false;
 let candidateStoreUnavailable = false;
 let reviewSync = null;
+let approvedCandidates = [];
+let loadedApprovedCount = null;
+let investigationSummary = null;
+let investigationEntries = [];
+let queueSyncRunning = false;
+let queueRetryTimer = null;
+let investigationRefreshRunning = false;
+const queuedCandidateIds = new Set();
+const pendingQueueCandidates = new Map();
 const selectionGroup = L.featureGroup();
 const class6Group = L.featureGroup();
 const roofGroup = L.featureGroup();
@@ -87,8 +109,8 @@ L.control
     { Streets: baseStreet, Satellite: baseSatellite },
     {
       'Selection boundary': selectionGroup,
-      'Existing Class 6 evidence': class6Group,
-      'New roof-like candidates': roofGroup,
+      'AI-approved Class 6 detections': class6Group,
+      'AI-approved non-Class-6 roof candidates': roofGroup,
     },
     { collapsed: true },
   )
@@ -114,6 +136,500 @@ function formatBytes(bytes) {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(2)} MiB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
+}
+
+async function investigationApi(method, parameters = {}) {
+  const token = await getScanIdToken();
+  const url = new URL('/api/investigations', window.location.origin);
+  const options = {
+    method,
+    headers: { Authorization: `Bearer ${token}` },
+    cache: 'no-store',
+  };
+  if (method === 'GET') {
+    for (const [key, value] of Object.entries(parameters)) {
+      url.searchParams.set(key, String(value));
+    }
+  } else {
+    options.headers['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(parameters);
+  }
+  const response = await fetch(url, options);
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    result = null;
+  }
+  if (!response.ok) {
+    throw new Error(result?.error || `Investigation service returned HTTP ${response.status}.`);
+  }
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new Error(
+      'Investigation API returned an empty or non-JSON response. Configure Cloudflare Pages Functions; a plain Vite server does not provide this API.',
+    );
+  }
+  return result;
+}
+
+function setInvestigationError(message) {
+  elements.investigationError.textContent = message;
+  elements.investigationError.hidden = !message;
+  if (message) {
+    elements.investigationServiceState.textContent = 'Service error';
+    elements.investigationServiceState.dataset.state = 'error';
+  }
+}
+
+function persistPendingQueueLocally() {
+  try {
+    localStorage.setItem(
+      LOCAL_PENDING_QUEUE_KEY,
+      JSON.stringify([...pendingQueueCandidates.values()]),
+    );
+  } catch (error) {
+    setInvestigationError(
+      `Could not persist the offline queue in this browser: ${error.message}. Firebase storage or the Cloudflare queue must be available before leaving this page.`,
+    );
+  }
+}
+
+function restorePendingQueueLocally() {
+  let saved;
+  try {
+    saved = localStorage.getItem(LOCAL_PENDING_QUEUE_KEY);
+  } catch (error) {
+    setInvestigationError(`Could not access the browser's saved investigation queue: ${error.message}.`);
+    return;
+  }
+  if (!saved) return;
+  try {
+    const records = JSON.parse(saved);
+    if (!Array.isArray(records)) throw new Error('Stored queue is not an array.');
+    for (const candidate of records) {
+      if (candidate?.id && typeof candidate.id === 'string') {
+        pendingQueueCandidates.set(candidate.id, candidate);
+      }
+    }
+    if (pendingQueueCandidates.size) {
+      elements.investigationStatus.textContent =
+        `${formatCount(pendingQueueCandidates.size)} locally saved candidate(s) are waiting to synchronize.`;
+    }
+  } catch (error) {
+    setInvestigationError(
+      `The browser's saved investigation queue could not be read: ${error.message}. The damaged local record was left untouched.`,
+    );
+  }
+}
+
+function queueCandidateRecords(candidates) {
+  for (const candidate of candidates) {
+    if (
+      candidate?.id &&
+      !queuedCandidateIds.has(candidate.id) &&
+      !pendingQueueCandidates.has(candidate.id)
+    ) {
+      pendingQueueCandidates.set(candidate.id, candidate);
+    }
+  }
+  if (pendingQueueCandidates.size) persistPendingQueueLocally();
+  return pendingQueueCandidates.size
+    ? synchronizeInvestigationQueue()
+    : Promise.resolve();
+}
+
+async function synchronizeInvestigationQueue() {
+  if (queueSyncRunning || !pendingQueueCandidates.size) return;
+  queueSyncRunning = true;
+  if (queueRetryTimer) {
+    window.clearTimeout(queueRetryTimer);
+    queueRetryTimer = null;
+  }
+  try {
+    while (pendingQueueCandidates.size) {
+      const batch = [...pendingQueueCandidates.values()].slice(0, 50);
+      await investigationApi('POST', { action: 'queue', candidates: batch });
+      for (const candidate of batch) {
+        pendingQueueCandidates.delete(candidate.id);
+        queuedCandidateIds.add(candidate.id);
+      }
+      persistPendingQueueLocally();
+    }
+    setInvestigationError('');
+    elements.investigationServiceState.textContent = 'Queue connected';
+    elements.investigationServiceState.dataset.state = 'ready';
+    await refreshInvestigationData();
+  } catch (error) {
+    setInvestigationError(
+      `Could not persist ${pendingQueueCandidates.size} candidate(s) to the investigation queue: ${error.message}. They remain in Firebase/local scan evidence and will be retried automatically.`,
+    );
+    queueRetryTimer = window.setTimeout(() => {
+      queueRetryTimer = null;
+      void synchronizeInvestigationQueue();
+    }, 30_000);
+  } finally {
+    queueSyncRunning = false;
+  }
+}
+
+function countText(value) {
+  return formatCount(Number.isFinite(value) ? value : 0);
+}
+
+function renderInvestigationCounts(summary) {
+  elements.startInvestigationQueue.hidden = !isReviewOwner(currentUser);
+  elements.startInvestigationQueue.disabled = summary.queue.active;
+  elements.startInvestigationQueue.textContent = summary.queue.active
+    ? 'Queue started · resumes automatically'
+    : 'Start investigation queue';
+  elements.stopInvestigationQueue.hidden = !isReviewOwner(currentUser);
+  elements.stopInvestigationQueue.disabled = !summary.queue.active;
+  const cron = summary.queue.cron;
+  if (!cron) {
+    elements.investigationCronStatus.textContent =
+      'No scheduled Worker run is recorded yet. Deploy the independent Cron Worker and apply the D1 schema.';
+  } else {
+    const finished = cron.lastFinishedAt
+      ? new Date(cron.lastFinishedAt * 1000).toLocaleString()
+      : 'still running';
+    const candidate = cron.lastCandidateId ? ` · candidate ${cron.lastCandidateId}` : '';
+    const failure = cron.lastError ? ` · error: ${cron.lastError}` : '';
+    elements.investigationCronStatus.textContent =
+      `Last Cron run: ${finished} · ${cron.lastStatus || 'unknown'} · ${countText(cron.invocationCount)} total runs${candidate}${failure}`;
+  }
+  elements.investigationCounts.replaceChildren();
+  for (const [key, label] of [
+    ['total', 'Detected total'],
+    ['pending', 'Waiting'],
+    ['analyzing', 'Analyzing'],
+    ['approved', 'Approved'],
+    ['rejected', 'Rejected'],
+    ['uncertain', 'Uncertain'],
+    ['quota_paused', 'Quota paused'],
+    ['error', 'Errors'],
+  ]) {
+    const value = key === 'total' ? summary.total : summary.counts[key];
+    const item = document.createElement('div');
+    item.className = 'investigation-count';
+    const count = document.createElement('strong');
+    count.textContent = countText(value);
+    const name = document.createElement('span');
+    name.textContent = label;
+    item.append(count, name);
+    elements.investigationCounts.append(item);
+  }
+  const quota = summary.quota;
+  elements.investigationQuota.textContent =
+    `${countText(quota.estimatedCallsRemaining)} estimated review(s) remain in this app's daily free-use budget ` +
+    `(${countText(quota.estimatedNeuronsRemaining)} of ${countText(quota.dailyBudgetNeurons)} reserved Neurons). ` +
+    `Budget resets at ${new Date(Number(quota.resetsAtUtc) * 1000).toISOString()}. ` +
+    'Cloudflare free allocation is shared with other workloads on your account.';
+  if (summary.counts.quota_paused) {
+    elements.investigationStatus.textContent =
+      'The queue is safely paused at its daily AI budget. Candidates remain stored and resume after the UTC reset.';
+    elements.investigationServiceState.textContent = 'Daily budget reached';
+    elements.investigationServiceState.dataset.state = 'paused';
+  } else if (!summary.queue.active && summary.counts.pending) {
+    elements.investigationStatus.textContent =
+      'The backlog is saved. The owner can start it once; candidates will then process sequentially.';
+    elements.investigationServiceState.textContent = 'Queue not started';
+    elements.investigationServiceState.dataset.state = 'ready';
+  } else if (summary.counts.analyzing) {
+    elements.investigationStatus.textContent = 'A candidate is being reviewed. Processing is sequential.';
+  } else if (summary.counts.pending) {
+    elements.investigationStatus.textContent =
+      `${countText(summary.counts.pending)} candidate(s) are waiting for sequential review.`;
+  } else {
+    elements.investigationStatus.textContent =
+      'All queued candidates have a saved investigation result. New scans and older Firebase records are synchronized automatically.';
+  }
+  if (elements.investigationError.hidden && !summary.counts.quota_paused) {
+    if (!summary.queue.active) {
+      elements.investigationServiceState.textContent = 'Queue stopped';
+      elements.investigationServiceState.dataset.state = 'ready';
+    } else if (summary.queue.cron?.lastStatus === 'failed') {
+      elements.investigationServiceState.textContent = 'Cron execution error';
+      elements.investigationServiceState.dataset.state = 'error';
+    } else if (!summary.queue.cron) {
+      elements.investigationServiceState.textContent = 'Awaiting Cron Worker';
+      elements.investigationServiceState.dataset.state = 'ready';
+    } else {
+      elements.investigationServiceState.textContent = 'Cron Worker connected';
+      elements.investigationServiceState.dataset.state = 'ready';
+    }
+  }
+}
+
+function appendReportList(container, heading, entries) {
+  if (!Array.isArray(entries) || !entries.length) return;
+  const title = document.createElement('strong');
+  title.textContent = heading;
+  const list = document.createElement('ul');
+  for (const detail of entries) {
+    const item = document.createElement('li');
+    item.textContent = detail;
+    list.append(item);
+  }
+  container.append(title, list);
+}
+
+function renderInvestigationReport(entry, body) {
+  const candidate = entry.candidate;
+  const report = entry.report;
+  const dimensions = candidate.dimensions || {};
+  const height = candidate.relativeHeightUnits;
+  const measurements = document.createElement('p');
+  measurements.textContent =
+    `${candidate.latitude.toFixed(6)}, ${candidate.longitude.toFixed(6)} · ` +
+    `${Number.isFinite(dimensions.widthMeters) && Number.isFinite(dimensions.lengthMeters) ? `${dimensions.widthMeters.toFixed(1)} × ${dimensions.lengthMeters.toFixed(1)} m` : 'dimensions unavailable'} · ` +
+    `${countText(candidate.pointCount)} LiDAR points · relative height ${Number.isFinite(height) ? `${height.toFixed(2)} LAS Z units` : 'unavailable'} (vertical reference unverified).`;
+  body.append(measurements);
+  const classificationCounts = candidate.classificationCounts || {};
+  const classifications = document.createElement('p');
+  classifications.textContent = `LiDAR classification counts: ${Object.entries(classificationCounts)
+    .map(([classification, count]) => `${classification === 'other' ? 'other' : `Class ${classification}`} ${countText(count)}`)
+    .join(' · ') || 'unavailable'}.`;
+  body.append(classifications);
+  appendReportList(body, 'LiDAR evidence', candidate.evidence);
+  if (!report) {
+    const state = document.createElement('p');
+    state.textContent =
+      entry.status === 'analyzing'
+        ? 'Investigation is currently running.'
+        : 'No investigation report has been produced yet.';
+    body.append(state);
+    return;
+  }
+
+  const summary = document.createElement('p');
+  summary.textContent =
+    `${report.classification || 'unclassified'} · AI confidence ${Number.isFinite(report.confidence) ? `${Math.round(report.confidence * 100)}%` : 'unavailable'}. ` +
+    `${report.description || ''}`;
+  body.append(summary);
+  const processing = document.createElement('p');
+  const processingDetails = [
+    Number.isFinite(report.processingSeconds)
+      ? `Processing time ${report.processingSeconds.toFixed(2)} s`
+      : null,
+    Number.isFinite(report.imageBytes)
+      ? `aerial image payload ${formatBytes(report.imageBytes)}`
+      : null,
+    Number.isFinite(report.publicContextBytes)
+      ? `OpenStreetMap response payload ${formatBytes(report.publicContextBytes)}`
+      : null,
+    report.aiModel ? `model ${report.aiModel}` : null,
+  ].filter(Boolean);
+  if (processingDetails.length) {
+    processing.textContent = processingDetails.join(' · ');
+    body.append(processing);
+  }
+  if (report.rejection_reason) {
+    const reason = document.createElement('p');
+    reason.textContent = `Decision reason: ${report.rejection_reason}`;
+    body.append(reason);
+  }
+  appendReportList(body, 'Positive evidence', report.positive_evidence);
+  appendReportList(body, 'Negative evidence', report.negative_evidence);
+  appendReportList(body, 'LiDAR observations', report.lidar_observations);
+  appendReportList(body, 'Imagery observations', report.imagery_observations);
+  const context = report.publicContext;
+  if (context?.features?.length) {
+    appendReportList(
+      body,
+      'Nearby OpenStreetMap features (not proof on their own)',
+      context.features.map((feature) => `${feature.description} · ${feature.distanceMeters ?? 'unknown'} m`),
+    );
+    if (context.attribution) {
+      const attribution = document.createElement('p');
+      attribution.textContent = context.attribution;
+      body.append(attribution);
+    }
+  } else if (context?.note) {
+    const publicContext = document.createElement('p');
+    publicContext.textContent = context.note;
+    body.append(publicContext);
+  }
+  if (report.imagerySource) {
+    const source = document.createElement('p');
+    source.textContent = `Imagery source: ${report.imagerySource}${report.imageryAttribution ? ` · ${report.imageryAttribution}` : ''}`;
+    body.append(source);
+  }
+  if (report.imageUrl) {
+    const image = document.createElement('img');
+    image.src = report.imageUrl;
+    image.alt = `Aerial image crop for ${entry.candidateId}`;
+    image.loading = 'lazy';
+    image.referrerPolicy = 'no-referrer';
+    body.append(image);
+  }
+  if (entry.error || report.error) {
+    const error = document.createElement('p');
+    error.textContent = `Error: ${entry.error || report.error}`;
+    body.append(error);
+  }
+}
+
+function addInvestigationEntry(entry) {
+  const details = document.createElement('details');
+  details.className = 'investigation-entry';
+  const summary = document.createElement('summary');
+  const title = document.createElement('span');
+  title.className = 'investigation-entry-title';
+  title.textContent =
+    `${entry.candidateId} · ${entry.candidate.latitude.toFixed(5)}, ${entry.candidate.longitude.toFixed(5)}`;
+  const status = document.createElement('span');
+  status.className = 'investigation-status-chip';
+  status.dataset.status = entry.status;
+  status.textContent = entry.status.replace('_', ' ');
+  summary.append(title, status);
+  const body = document.createElement('div');
+  body.className = 'investigation-entry-body';
+  renderInvestigationReport(entry, body);
+  details.append(summary, body);
+
+  if (canManuallyRetry(entry.status)) {
+    const actions = document.createElement('div');
+    actions.className = 'investigation-entry-actions';
+    if (isReviewOwner(currentUser)) {
+      const retry = document.createElement('button');
+      retry.className = 'secondary-button';
+      retry.type = 'button';
+      retry.textContent = 'Retry investigation';
+      retry.addEventListener('click', async () => {
+        retry.disabled = true;
+        try {
+          await investigationApi('POST', { action: 'retry', candidateId: entry.candidateId });
+          setInvestigationError('');
+          await refreshInvestigationData();
+        } catch (error) {
+          setInvestigationError(`Could not retry ${entry.candidateId}: ${error.message}`);
+          retry.disabled = false;
+        }
+      });
+      actions.append(retry);
+    } else {
+      const note = document.createElement('span');
+      note.textContent = 'Sign in with the configured owner Google account to retry.';
+      actions.append(note);
+    }
+    body.append(actions);
+  }
+  if (entry.attemptCount > 1) {
+    const historyButton = document.createElement('button');
+    historyButton.className = 'secondary-button';
+    historyButton.type = 'button';
+    historyButton.textContent = 'Load previous attempts';
+    historyButton.addEventListener('click', async () => {
+      historyButton.disabled = true;
+      try {
+        const result = await investigationApi('GET', {
+          action: 'report',
+          candidateId: entry.candidateId,
+        });
+        for (const attempt of result.history.slice(1)) {
+          const previous = document.createElement('p');
+          previous.textContent =
+            `Attempt ${attempt.attemptCount} (${attempt.status}): ${attempt.report.description || attempt.report.rejection_reason || 'No description'}`;
+          body.append(previous);
+        }
+        historyButton.remove();
+      } catch (error) {
+        setInvestigationError(`Could not load previous attempts: ${error.message}`);
+        historyButton.disabled = false;
+      }
+    });
+    body.append(historyButton);
+  }
+  elements.investigationHistory.append(details);
+}
+
+function renderInvestigationHistory() {
+  elements.investigationHistory.replaceChildren();
+  if (!investigationEntries.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = 'No candidate investigations have been recorded yet.';
+    elements.investigationHistory.append(empty);
+    return;
+  }
+  for (const entry of investigationEntries) addInvestigationEntry(entry);
+}
+
+function approvedMarkerRecords(result) {
+  return result.items.map((entry) => ({
+    ...entry.candidate,
+    investigationReport: entry.report,
+  }));
+}
+
+async function loadApprovedCandidates(expectedCount) {
+  const loaded = [];
+  let offset = 0;
+  let page;
+  do {
+    page = await investigationApi('GET', { action: 'approved', limit: 500, offset });
+    loaded.push(...approvedMarkerRecords(page));
+    offset += page.items.length;
+  } while (page.hasMore);
+  approvedCandidates = loaded;
+  loadedApprovedCount = expectedCount;
+  if (loaded.length !== expectedCount) {
+    elements.investigationStatus.textContent =
+      `Loaded ${formatCount(loaded.length)} of ${formatCount(expectedCount)} approved investigation record(s); refresh to retry if the counts differ.`;
+  }
+  renderCandidateLayers();
+  if (!candidateStoreUnavailable) {
+    showCandidates(approvedCandidates, approvedCandidates.length);
+  }
+}
+
+async function refreshInvestigationData() {
+  if (investigationRefreshRunning) return;
+  investigationRefreshRunning = true;
+  try {
+    const data = await investigationApi('GET', { action: 'list', limit: 25, offset: 0 });
+    investigationSummary = data;
+    renderInvestigationCounts(data);
+    const older = investigationEntries.slice(25);
+    const merged = new Map(data.items.map((entry) => [entry.candidateId, entry]));
+    for (const entry of older) {
+      if (!merged.has(entry.candidateId)) merged.set(entry.candidateId, entry);
+    }
+    investigationEntries = [...merged.values()];
+    elements.loadMoreInvestigations.hidden = data.total <= investigationEntries.length;
+    renderInvestigationHistory();
+    if (loadedApprovedCount !== data.counts.approved) {
+      await loadApprovedCandidates(data.counts.approved);
+    }
+    setInvestigationError('');
+  } catch (error) {
+    setInvestigationError(
+      `Investigation API is unavailable: ${error.message}. Configure Pages Functions with D1 and Workers AI bindings; unapproved candidates remain hidden.`,
+    );
+    elements.investigationServiceState.textContent = 'Backend not ready';
+    elements.investigationServiceState.dataset.state = 'error';
+  } finally {
+    investigationRefreshRunning = false;
+  }
+}
+
+async function loadMoreInvestigations() {
+  elements.loadMoreInvestigations.disabled = true;
+  try {
+    const page = await investigationApi('GET', {
+      action: 'list',
+      limit: 25,
+      offset: investigationEntries.length,
+    });
+    const existing = new Set(investigationEntries.map((entry) => entry.candidateId));
+    investigationEntries.push(...page.items.filter((entry) => !existing.has(entry.candidateId)));
+    elements.loadMoreInvestigations.hidden = !page.hasMore;
+    renderInvestigationHistory();
+  } catch (error) {
+    setInvestigationError(`Could not load older investigations: ${error.message}`);
+  } finally {
+    elements.loadMoreInvestigations.disabled = false;
+  }
 }
 
 function updateStatus(title, detail) {
@@ -218,20 +734,11 @@ map.on(L.Draw.Event.CREATED, (event) => {
 function clearResults() {
   tiles = [];
   displayedPointCount = 0;
-  currentCandidates = [];
-  currentCandidateCount = 0;
-  hasCandidateScan = false;
-  candidateStoreUnavailable = false;
+  candidateStoreUnavailable = !reviewStoreReady || Boolean(reviewStoreError);
   renderCandidateLayers();
   elements.viewerTitle.textContent = 'Waiting for real EPT points';
   elements.viewerCount.textContent = '0 points';
-  elements.candidateTitle.textContent = 'No candidates yet';
-  elements.candidateSummary.replaceChildren();
-  elements.candidateList.replaceChildren();
-  const message = document.createElement('p');
-  message.className = 'muted';
-  message.textContent = 'Run a scan to see candidate structure evidence.';
-  elements.candidateList.append(message);
+  showCandidates(approvedCandidates, approvedCandidates.length);
   elements.diagnostics.replaceChildren();
   appendDiagnostic('Status', 'No scan run');
   if (renderer) renderer.clear();
@@ -420,21 +927,42 @@ function refreshPointView(bounds, pointBudget) {
 }
 
 function confidenceColor(candidate) {
-  if (candidate.score >= 75) return '#e05252';
-  if (candidate.score >= 50) return '#e5a331';
-  return '#78838c';
+  const confidence = candidate.investigationReport?.confidence || 0;
+  if (confidence >= 0.95) return '#087c68';
+  if (confidence >= 0.9) return '#2878b5';
+  return '#e5a331';
 }
 
 function makePopup(candidate) {
   const content = document.createElement('div');
   content.className = 'candidate-popup';
+  const report = candidate.investigationReport;
   const title = document.createElement('strong');
   title.textContent = `${candidate.id} · ${candidate.category}`;
   const coords = document.createElement('span');
   coords.textContent =
     `${candidate.latitude.toFixed(6)}, ${candidate.longitude.toFixed(6)}`;
   const score = document.createElement('span');
-  score.textContent = `${candidate.confidence} heuristic confidence · ${candidate.score}/100`;
+  score.textContent =
+    `${report.classification} · ${Math.round(report.confidence * 100)}% AI confidence · ` +
+    `LiDAR heuristic ${candidate.score}/100`;
+  const description = document.createElement('span');
+  description.textContent = report.description;
+  content.append(title, coords, score, description);
+  appendReportList(content, 'Positive evidence', report.positive_evidence);
+  appendReportList(content, 'Negative evidence', report.negative_evidence);
+  appendReportList(content, 'LiDAR observations', report.lidar_observations);
+  appendReportList(content, 'Imagery observations', report.imagery_observations);
+  if (report.imageUrl) {
+    const image = document.createElement('img');
+    image.src = report.imageUrl;
+    image.alt = `Aerial imagery for ${candidate.id}`;
+    image.loading = 'lazy';
+    image.referrerPolicy = 'no-referrer';
+    image.style.maxWidth = '240px';
+    image.style.height = 'auto';
+    content.append(image);
+  }
   const actions = document.createElement('div');
   actions.className = 'candidate-popup-actions';
   const earthLink = document.createElement('a');
@@ -443,13 +971,13 @@ function makePopup(candidate) {
   earthLink.rel = 'noopener noreferrer';
   earthLink.textContent = 'View in Google Earth 3D';
   actions.append(earthLink);
-  content.append(title, coords, score, actions);
+  content.append(actions);
   return content;
 }
 
 function addCandidateToMap(candidate) {
   const color = confidenceColor(candidate);
-  const targetGroup = candidate.class6Count ? class6Group : roofGroup;
+  const targetGroup = candidate.class6Count > 0 ? class6Group : roofGroup;
   const rectangle = L.rectangle(
     [
       [candidate.bbox.south, candidate.bbox.west],
@@ -473,18 +1001,11 @@ function addCandidateToMap(candidate) {
 function renderCandidateLayers() {
   class6Group.clearLayers();
   roofGroup.clearLayers();
+  if (candidateStoreUnavailable) return;
   const visible = new Map();
-  for (const review of candidateReviews) {
-    if (!review.removed) visible.set(review.id, review);
-  }
-  for (const submission of candidateSubmissions) {
-    if (!getCandidateMatch(submission, candidateReviews)) {
-      visible.set(submission.id, submission);
-    }
-  }
-  for (const candidate of currentCandidates) {
-    if (getCandidateMatch(candidate, candidateReviews)) continue;
-    visible.set(candidate.id, candidate);
+  for (const candidate of approvedCandidates) {
+    const review = getCandidateMatch(candidate, candidateReviews);
+    if (!review?.removed) visible.set(candidate.id, candidate);
   }
   for (const candidate of visible.values()) addCandidateToMap(candidate);
 }
@@ -498,8 +1019,9 @@ function addCandidateRow(candidate) {
   title.textContent = `${candidate.id} · ${candidate.category}`;
   const badge = document.createElement('span');
   badge.className = 'confidence-chip';
-  badge.dataset.confidence = candidate.confidence.toLowerCase();
-  badge.textContent = `${candidate.confidence} · ${candidate.score}/100`;
+  const confidence = candidate.investigationReport.confidence;
+  badge.dataset.confidence = confidence >= 0.95 ? 'high' : confidence >= 0.9 ? 'medium' : 'low';
+  badge.textContent = `${Math.round(confidence * 100)}% AI · LiDAR ${candidate.score}/100`;
   heading.append(title, badge);
   const summary = document.createElement('p');
   summary.textContent =
@@ -551,18 +1073,20 @@ function addCandidateRow(candidate) {
 }
 
 function showCandidates(candidates, totalCandidateCount = candidates.length) {
-  currentCandidates = candidates;
-  currentCandidateCount = totalCandidateCount;
+  approvedCandidates = candidates;
   hasCandidateScan = true;
-  candidateStoreUnavailable = false;
   renderCandidateLayers();
   elements.candidateList.replaceChildren();
-  const high = candidates.filter((candidate) => candidate.confidence === 'High').length;
-  const medium = candidates.filter((candidate) => candidate.confidence === 'Medium').length;
+  const high = candidates.filter((candidate) => candidate.investigationReport?.confidence >= 0.95).length;
+  const medium = candidates.filter(
+    (candidate) =>
+      candidate.investigationReport?.confidence >= 0.9 &&
+      candidate.investigationReport.confidence < 0.95,
+  ).length;
   const low = candidates.length - high - medium;
   elements.candidateTitle.textContent = totalCandidateCount
-    ? `${formatCount(totalCandidateCount)} potential structure candidate(s)`
-    : 'No candidates passed the evidence filters';
+    ? `${formatCount(totalCandidateCount)} AI-approved structure(s)`
+    : 'No investigations have been approved';
   elements.candidateSummary.replaceChildren();
   for (const [label, value] of [
     ['High', high],
@@ -579,7 +1103,7 @@ function showCandidates(candidates, totalCandidateCount = candidates.length) {
     const message = document.createElement('p');
     message.className = 'muted';
     message.textContent =
-      'No connected footprint met the heuristic filters. This does not prove that the selected area contains no buildings.';
+      'No candidate has passed both the conservative visual-confidence threshold and independent LiDAR evidence gate. Rejected, uncertain, and pending records remain in the investigation history.';
     elements.candidateList.append(message);
     return;
   }
@@ -589,15 +1113,14 @@ function showCandidates(candidates, totalCandidateCount = candidates.length) {
   if (totalCandidateCount > candidates.length) {
     const note = document.createElement('p');
     note.className = 'muted';
-    note.textContent =
-      `Showing the ${formatCount(candidates.length)} highest-scoring candidates of ${formatCount(totalCandidateCount)}; the remainder are not added to the map to keep it responsive.`;
+    note.textContent = `${formatCount(totalCandidateCount - candidates.length)} candidate(s) have not passed investigation and remain off the map.`;
     elements.candidateList.append(note);
   }
 }
 
 function showCandidateStoreUnavailable(message) {
-  currentCandidates = [];
-  currentCandidateCount = 0;
+  approvedCandidates = [];
+  loadedApprovedCount = null;
   hasCandidateScan = true;
   candidateStoreUnavailable = true;
   renderCandidateLayers();
@@ -609,15 +1132,6 @@ function showCandidateStoreUnavailable(message) {
   notice.textContent =
     `Candidate detections are hidden so removed markers cannot reappear. ${message}`;
   elements.candidateList.append(notice);
-}
-
-function reviewIntersectsBounds(review, bounds) {
-  return (
-    review.bbox.west <= bounds.east &&
-    review.bbox.east >= bounds.west &&
-    review.bbox.south <= bounds.north &&
-    review.bbox.north >= bounds.south
-  );
 }
 
 function renderRemovedReviews() {
@@ -680,15 +1194,14 @@ function renderOwnerPanel() {
   elements.ownerPanelStatus.textContent = reviewStoreError
     ? `Shared marker storage unavailable: ${reviewStoreError}. Check the Realtime Database rules and enable Anonymous Authentication.`
     : reviewStoreReady
-      ? `${formatCount(candidateSubmissions.length)} shared scan marker(s) and ${formatCount(candidateReviews.filter((review) => review.removed).length)} removed marker(s) loaded.`
+      ? `${formatCount(candidateSubmissions.length)} shared scan candidate(s) and ${formatCount(candidateReviews.filter((review) => review.removed).length)} removed marker(s) loaded.`
       : 'Connecting to shared marker storage…';
+  if (reviewStoreReady) queueCandidateRecords(candidateSubmissions);
   renderRemovedReviews();
-  if (hasCandidateScan && !candidateStoreUnavailable) {
-    showCandidates(
-      removePreviouslyRemovedCandidates(currentCandidates, candidateReviews),
-      currentCandidateCount,
-    );
+  if (loadedApprovedCount !== null && !candidateStoreUnavailable) {
+    showCandidates(approvedCandidates, approvedCandidates.length);
   }
+  renderInvestigationHistory();
 }
 
 async function waitForReviewStore(timeoutMs) {
@@ -968,67 +1481,55 @@ async function scanArea() {
     if (renderer) refreshPointView(bounds, scan.profile.displayPoints);
     updateStatus('Analyzing point evidence', 'Grouping actual in-box returns and comparing elevated cells with nearby Class 2 ground samples.');
     const analysis = await analyzeCandidates(bounds);
+    candidates = analysis.candidates;
+    const prepared = prepareScannedCandidates(analysis.candidates, candidateReviews);
+    scan.typedArrayBytesBeforeAnalysis = analysis.typedArrayBytes;
+    scan.class6PointCount = analysis.class6Points;
+    scan.detectedCandidateCount = analysis.totalCandidateCount;
+    scan.totalCandidateCount = analysis.totalCandidateCount;
     const reviewState = await waitForReviewStore(10_000);
     if (!reviewState.ok || reviewStoreError || !reviewStoreReady) {
+      await queueCandidateRecords(prepared.detected);
       const storageMessage =
         reviewStoreError || reviewState.error?.message || 'Shared marker storage is not ready.';
       showCandidateStoreUnavailable(storageMessage);
-      scan.detectedCandidateCount = analysis.totalCandidateCount;
-      scan.totalCandidateCount = 0;
       const fps = renderer ? await sampleFps() : null;
       const scanElapsedMs = performance.now() - scanStarted;
       elements.viewerTitle.textContent = rendererError
         ? `Points decoded; rendering unavailable: ${rendererError}`
         : 'Actual USGS EPT points rendered';
       updateStatus(
-        'Scan complete · candidate markers hidden',
-        `${formatCount(scan.pointsInSelection)} actual points decoded. ${formatCount(analysis.totalCandidateCount)} potential candidate(s) were detected, but are hidden until shared marker storage is available.`,
+        'Scan complete · marker storage unavailable',
+        `${formatCount(scan.pointsInSelection)} actual points decoded and ${formatCount(analysis.totalCandidateCount)} candidate(s) were submitted for investigation. Shared Firebase evidence could not be updated; candidates remain off the map.`,
       );
-      makeDiagnostics(discovery, scan, [], bounds, scanElapsedMs, fps);
+      makeDiagnostics(discovery, scan, candidates, bounds, scanElapsedMs, fps);
       return;
     }
 
     const saved = await saveScannedCandidates(analysis.candidates, candidateReviews);
-    const newlyDetectedCandidates = saved.visible;
+    await queueCandidateRecords(saved.detected);
     const submissionsById = new Map(
       candidateSubmissions.map((candidate) => [candidate.id, candidate]),
     );
-    for (const candidate of newlyDetectedCandidates) {
+    for (const candidate of saved.visible) {
       submissionsById.set(candidate.id, candidate);
     }
     candidateSubmissions = [...submissionsById.values()];
     renderCandidateLayers();
     renderRemovedReviews();
-    const savedInSelection = [...candidateReviews, ...candidateSubmissions].filter(
-      (review) => !review.removed && reviewIntersectsBounds(review, bounds),
-    );
-    const displayById = new Map(
-      savedInSelection.map((candidate) => [candidate.id, candidate]),
-    );
-    for (const candidate of newlyDetectedCandidates) {
-      if (!getCandidateMatch(candidate, candidateReviews)) {
-        displayById.set(candidate.id, candidate);
-      }
-    }
-    candidates = [...displayById.values()].sort((first, second) => second.score - first.score);
-    scan.typedArrayBytesBeforeAnalysis = analysis.typedArrayBytes;
-    scan.class6PointCount = analysis.class6Points;
-    scan.detectedCandidateCount = analysis.totalCandidateCount;
-    scan.totalCandidateCount = candidates.length;
-    showCandidates(candidates, candidates.length);
+    scan.totalCandidateCount = analysis.totalCandidateCount;
+    showCandidates(approvedCandidates, approvedCandidates.length);
     const fps = renderer ? await sampleFps() : null;
     const scanElapsedMs = performance.now() - scanStarted;
     elements.viewerTitle.textContent = rendererError
       ? `Points decoded; rendering unavailable: ${rendererError}`
       : 'Actual USGS EPT points rendered';
-    const markerPersistence = newlyDetectedCandidates.length
-      ? `${newlyDetectedCandidates.length} marker(s) saved to shared storage.`
-      : candidates.length
-        ? 'No new markers needed saving; the displayed markers were already shared or had been removed.'
-        : 'No markers were saved because this scan found no candidates.';
+    const markerPersistence = analysis.totalCandidateCount
+      ? `${analysis.totalCandidateCount} candidate(s) were stored for sequential investigation; none are shown as normal markers before approval.`
+      : 'No LiDAR candidates were detected in this scan.';
     updateStatus(
       'Scan complete',
-      `${formatCount(scan.pointsInSelection)} actual points decoded inside the selection; ${candidates.length} heuristic candidate(s). ${markerPersistence} No structure is confirmed by this scan.`,
+      `${formatCount(scan.pointsInSelection)} actual points decoded inside the selection; ${formatCount(analysis.totalCandidateCount)} heuristic candidate(s). ${markerPersistence} No structure is confirmed by this scan.`,
     );
     makeDiagnostics(discovery, scan, candidates, bounds, scanElapsedMs, fps);
   } catch (error) {
@@ -1106,6 +1607,29 @@ elements.searchForm.addEventListener('submit', searchLocation);
 elements.clear.addEventListener('click', clearSelection);
 elements.scan.addEventListener('click', scanArea);
 elements.cancel.addEventListener('click', () => scanController?.abort());
+elements.loadMoreInvestigations.addEventListener('click', loadMoreInvestigations);
+elements.startInvestigationQueue.addEventListener('click', async () => {
+  elements.startInvestigationQueue.disabled = true;
+  try {
+    await investigationApi('POST', { action: 'start' });
+    setInvestigationError('');
+    await refreshInvestigationData();
+  } catch (error) {
+    setInvestigationError(`Could not start the investigation queue: ${error.message}`);
+    elements.startInvestigationQueue.disabled = false;
+  }
+});
+elements.stopInvestigationQueue.addEventListener('click', async () => {
+  elements.stopInvestigationQueue.disabled = true;
+  try {
+    await investigationApi('POST', { action: 'stop' });
+    setInvestigationError('');
+    await refreshInvestigationData();
+  } catch (error) {
+    setInvestigationError(`Could not stop the investigation queue: ${error.message}`);
+    elements.stopInvestigationQueue.disabled = false;
+  }
+});
 elements.ownerSignIn.addEventListener('click', async () => {
   elements.ownerSignIn.disabled = true;
   elements.ownerPanelStatus.textContent = 'Opening Google sign-in…';
@@ -1142,6 +1666,8 @@ window.addEventListener('resize', () => {
 map.whenReady(() => window.setTimeout(() => map.invalidateSize(), 0));
 setCoverageStatus('Not scanned', 'idle');
 updateActions();
+restorePendingQueueLocally();
+void synchronizeInvestigationQueue();
 reviewSync = listenToCandidateReviews(
   ({ reviews, submissions }) => {
     candidateReviews = reviews;
@@ -1156,7 +1682,6 @@ reviewSync = listenToCandidateReviews(
     reviewStoreReady = false;
     reviewStoreError = error.message;
     candidateReviews = [];
-    currentCandidates = [];
     candidateStoreUnavailable = true;
     renderCandidateLayers();
     if (hasCandidateScan) {
@@ -1173,4 +1698,11 @@ listenToOwnerAuth((user, error) => {
     elements.ownerPanelStatus.textContent = `Firebase sign-in state unavailable: ${error.message}`;
   }
   renderOwnerPanel();
+  renderInvestigationHistory();
+  void refreshInvestigationData();
 });
+
+window.setInterval(() => {
+  if (reviewStoreReady) queueCandidateRecords(candidateSubmissions);
+  void refreshInvestigationData();
+}, 60_000);

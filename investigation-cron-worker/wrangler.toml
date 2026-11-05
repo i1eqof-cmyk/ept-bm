@@ -1,0 +1,15 @@
+name = "lidar-investigation-cron"
+main = "src/index.js"
+compatibility_date = "2026-11-05"
+workers_dev = false
+
+[triggers]
+crons = ["* * * * *"]
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "REPLACE_WITH_EXISTING_D1_DATABASE_NAME"
+database_id = "REPLACE_WITH_EXISTING_D1_DATABASE_ID"

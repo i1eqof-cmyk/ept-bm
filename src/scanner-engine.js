@@ -5,7 +5,6 @@ const DEFAULT_SCAN_NODE_POINT_LIMIT = 8_000_000;
 
 const PROGRESSIVE_POINT_GRID_METERS = 2.5;
 const MAX_HIERARCHY_FILES = 50_000;
-const MAX_CANDIDATE_RESULTS = 500;
 
 function getSourceProjection(dataset) {
   const { metadata, projectionWkt, horizontalCrs } = dataset;
@@ -453,6 +452,9 @@ function pointGrid(tiles) {
           nonGroundMinZ: Infinity,
           nonGroundMaxZ: -Infinity,
           class6Count: 0,
+          class3Count: 0,
+          class4Count: 0,
+          class5Count: 0,
           vegetationCount: 0,
           otherCount: 0,
         };
@@ -468,8 +470,16 @@ function pointGrid(tiles) {
         cell.nonGroundMinZ = Math.min(cell.nonGroundMinZ, z);
         cell.nonGroundMaxZ = Math.max(cell.nonGroundMaxZ, z);
       }
-      if (classification === 6) cell.class6Count += 1;
-      else if ([3, 4, 5].includes(classification)) cell.vegetationCount += 1;
+      if (classification === 3) {
+        cell.class3Count += 1;
+        cell.vegetationCount += 1;
+      } else if (classification === 4) {
+        cell.class4Count += 1;
+        cell.vegetationCount += 1;
+      } else if (classification === 5) {
+        cell.class5Count += 1;
+        cell.vegetationCount += 1;
+      } else if (classification === 6) cell.class6Count += 1;
       else cell.otherCount += 1;
     }
   }
@@ -549,8 +559,13 @@ function scoreCandidate(group) {
   const areaSquareMeters =
     group.length * PROGRESSIVE_POINT_GRID_METERS ** 2;
   const pointCount = group.reduce((sum, cell) => sum + cell.count, 0);
+  const groundPointCount = group.reduce((sum, cell) => sum + cell.groundCount, 0);
   const class6Count = group.reduce((sum, cell) => sum + cell.class6Count, 0);
+  const class3Count = group.reduce((sum, cell) => sum + cell.class3Count, 0);
+  const class4Count = group.reduce((sum, cell) => sum + cell.class4Count, 0);
+  const class5Count = group.reduce((sum, cell) => sum + cell.class5Count, 0);
   const vegetationCount = group.reduce((sum, cell) => sum + cell.vegetationCount, 0);
+  const otherCount = group.reduce((sum, cell) => sum + cell.otherCount, 0);
   const groundCells = group.filter((cell) => cell.localGroundZ !== null);
   const elevatedCells = group.filter((cell) => cell.elevated);
   const planarCells = elevatedCells.filter((cell) => cell.planar);
@@ -635,8 +650,18 @@ function scoreCandidate(group) {
     evidence,
     dimensions: { widthMeters, lengthMeters, areaSquareMeters, aspectRatio },
     pointCount,
+    classificationCounts: {
+      2: groundPointCount,
+      3: class3Count,
+      4: class4Count,
+      5: class5Count,
+      6: class6Count,
+      other: otherCount,
+    },
     class6Count,
+    class6Share,
     vegetationShare,
+    density,
     groundCoverage,
     planarCoverage,
     medianRoughness,
@@ -706,7 +731,7 @@ export function detectCandidates(tiles, geographicBounds) {
 
   candidates.sort((a, b) => b.score - a.score);
   return {
-    candidates: candidates.slice(0, MAX_CANDIDATE_RESULTS),
+    candidates,
     totalCandidateCount: candidates.length,
   };
 }
