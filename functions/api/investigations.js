@@ -19,6 +19,7 @@ import {
   clearAllInvestigations as clearAllInvestigationRecords,
 } from '../_lib/queue-control.js';
 import { persistInvestigationResult } from '../_lib/queue-persistence.js';
+import { OWNER_UID } from '../../shared/owner.js';
 
 const MAX_QUEUE_BATCH = 50;
 const MAX_HISTORY_PAGE = 50;
@@ -346,7 +347,7 @@ async function getInvestigationReport(env, candidateId) {
 }
 
 async function retryInvestigation(env, body, user) {
-  if (!isQueueOwner(user, env.INVESTIGATION_OWNER_UID)) {
+  if (!isQueueOwner(user, OWNER_UID)) {
     throw new ApiError(403, 'Only the configured owner can retry an investigation.');
   }
   const candidateId = typeof body.candidateId === 'string' ? body.candidateId : '';
@@ -365,7 +366,7 @@ async function retryInvestigation(env, body, user) {
 }
 
 async function startQueue(env, user) {
-  if (!isQueueOwner(user, env.INVESTIGATION_OWNER_UID)) {
+  if (!isQueueOwner(user, OWNER_UID)) {
     throw new ApiError(403, 'Only the configured owner can start the AI investigation queue.');
   }
   const now = Math.floor(Date.now() / 1000);
@@ -680,7 +681,7 @@ async function addActualUsage(env, result) {
 }
 
 async function stopInvestigationQueue(env, user) {
-  if (!isQueueOwner(user, env.INVESTIGATION_OWNER_UID)) {
+  if (!isQueueOwner(user, OWNER_UID)) {
     throw new ApiError(403, 'Only the configured owner can stop the AI investigation queue.');
   }
   await persistQueueStop(env.DB, Math.floor(Date.now() / 1000));
@@ -688,7 +689,7 @@ async function stopInvestigationQueue(env, user) {
 }
 
 async function clearAllInvestigations(env, user) {
-  if (!isQueueOwner(user, env.INVESTIGATION_OWNER_UID)) {
+  if (!isQueueOwner(user, OWNER_UID)) {
     throw new ApiError(403, 'Only the configured owner can clear all investigations.');
   }
   return {

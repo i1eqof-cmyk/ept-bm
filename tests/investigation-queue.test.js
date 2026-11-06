@@ -15,6 +15,7 @@ import {
   stopQueue,
 } from '../functions/_lib/queue-control.js';
 import { persistInvestigationResult } from '../functions/_lib/queue-persistence.js';
+import { OWNER_UID } from '../shared/owner.js';
 
 function makeAtomicLockDatabase() {
   const lock = { leaseId: null, expiresAt: 0 };
@@ -57,6 +58,7 @@ function makeAtomicLockDatabase() {
 }
 
 test('queue stays disabled until the owner starts it and the start state survives reloads', () => {
+  assert.equal(isQueueOwner({ uid: OWNER_UID }, OWNER_UID), true);
   assert.equal(isQueueOwner({ uid: 'owner' }, 'owner'), true);
   assert.equal(isQueueOwner({ uid: 'visitor' }, 'owner'), false);
   assert.equal(isQueueEnabled(null), false);

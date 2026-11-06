@@ -193,12 +193,12 @@ LiDAR Z units and vertical datum remain unverified.
    | Variable | Value |
    | --- | --- |
    | `FIREBASE_PROJECT_ID` | `dep-lidar-scan` |
-   | `INVESTIGATION_OWNER_UID` | `6yr5pHdQccbW9551O853mpiax8O2` |
    | `AI_APPROVAL_CONFIDENCE` | `0.85` |
 
-   The project ID and owner UID are identifiers, not Cloudflare API secrets.
-   The function validates Firebase ID-token signatures; do not add a Cloudflare
-   API token to browser code.
+   The Firebase owner UID is defined once in `shared/owner.js`, shared by the
+   browser and Pages Function, and does not need a separate Pages environment
+   variable. The function validates Firebase ID-token signatures; do not add a
+   Cloudflare API token to browser code.
 6. Review Meta's Llama 3.2 license and acceptable-use policy. Cloudflare
    requires a one-time initial request to this model with prompt `agree`.
    Explicitly do this in Cloudflare's Workers AI Playground only after
