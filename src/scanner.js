@@ -95,12 +95,14 @@ const class6Group = L.featureGroup();
 const roofGroup = L.featureGroup();
 const baseStreet = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
+  noWrap: true,
   attribution: '&copy; OpenStreetMap contributors',
 });
 const baseSatellite = L.tileLayer(
   'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
   {
     maxZoom: 19,
+    noWrap: true,
     attribution:
       'Tiles &copy; Esri, Maxar, Earthstar Geographics, and the GIS User Community',
   },
@@ -108,6 +110,7 @@ const baseSatellite = L.tileLayer(
 const map = L.map('map', {
   center: [20, 0],
   zoom: 2,
+  minZoom: 3,
   layers: [baseSatellite, selectionGroup, class6Group, roofGroup],
   zoomControl: true,
 });
