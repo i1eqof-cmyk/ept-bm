@@ -340,6 +340,21 @@ progress:not([value]) { opacity: .55; }
   margin-bottom: 10px;
 }
 .owner-panel-actions span { color: #536159; font-size: .8rem; }
+.danger-button {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid #a32d27;
+  border-radius: 7px;
+  background: #fff5f4;
+  color: #8d211c;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.danger-button:disabled { opacity: .55; cursor: not-allowed; }
 .removed-candidate-list { display: grid; gap: 7px; }
 .removed-candidate-list h3 { margin: 4px 0; font-size: .87rem; }
 .removed-candidate-row {

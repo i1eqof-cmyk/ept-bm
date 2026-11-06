@@ -16,7 +16,7 @@ import {
   acquireProcessingLock,
   releaseProcessingLock,
   stopQueue as persistQueueStop,
-  clearPendingForestRunnerCandidates,
+  clearAllInvestigations as clearAllInvestigationRecords,
 } from '../_lib/queue-control.js';
 import { persistInvestigationResult } from '../_lib/queue-persistence.js';
 
@@ -687,13 +687,13 @@ async function stopInvestigationQueue(env, user) {
   return { active: false };
 }
 
-async function clearForestRunnerBacklog(env, user) {
+async function clearAllInvestigations(env, user) {
   if (!isQueueOwner(user, env.INVESTIGATION_OWNER_UID)) {
-    throw new ApiError(403, 'Only the configured owner can clear old forest-runner investigations.');
+    throw new ApiError(403, 'Only the configured owner can clear all investigations.');
   }
   return {
     active: false,
-    ...(await clearPendingForestRunnerCandidates(env.DB, Math.floor(Date.now() / 1000))),
+    ...(await clearAllInvestigationRecords(env.DB, Math.floor(Date.now() / 1000))),
   };
 }
 
@@ -868,9 +868,7 @@ async function handlePost(request, env, user) {
     return startQueue(env, user);
   }
   if (body.action === 'stop') return stopInvestigationQueue(env, user);
-  if (body.action === 'clearForestRunnerBacklog') {
-    return clearForestRunnerBacklog(env, user);
-  }
+  if (body.action === 'clearAll') return clearAllInvestigations(env, user);
   throw new ApiError(400, `Unsupported investigation action: ${String(body.action)}.`);
 }
 

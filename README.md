@@ -329,13 +329,12 @@ remain suppressed until restored in the Owner review panel. Candidate scoring
 and spatial matching are heuristic; a nearby, distinct structure may also be
 suppressed, so review restored markers carefully.
 
-The Owner review panel also has a bulk cleanup for records tagged by the old
-Forest Runner (`Forest LiDAR candidate…`). It hides only those matching
-locations, stops the investigation queue, and deletes their still-pending D1
-queue rows. Original Firebase scan evidence, completed investigation/history
-records, and other candidate types are retained; removed records are suppressed
-from automatic re-queueing. The owner must confirm the cleanup in the deployed
-site.
+The investigation panel has an owner-only **Clear all investigations and
+markers** action. After confirmation, it stops the queue, marks currently known
+candidate locations removed in Firebase so they stay hidden and are not
+re-queued, and deletes all D1 investigation and attempt-history rows. Original
+Firebase scan evidence and today's AI usage accounting are retained. The owner
+must be signed in and confirm the action in the deployed site.
 
 Before deploying, apply the rules in `database.rules.json` to the Realtime
 Database. If the project already has other data/rules, merge both the

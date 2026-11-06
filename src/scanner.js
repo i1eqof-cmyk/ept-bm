@@ -18,15 +18,11 @@ import {
   prepareScannedCandidates,
   saveScannedCandidates,
   removePreviouslyRemovedCandidates,
-  setForestRunnerCandidatesRemoved,
+  setAllCandidateRecordsRemoved,
   setCandidateRemoved,
   signInOwnerWithGoogle,
   signOutOwner,
 } from './candidate-reviews.js';
-import {
-  collectForestRunnerCandidates,
-  isForestRunnerCandidate,
-} from './forest-candidates.js';
 import {
   canManuallyRetry,
 } from '../functions/_lib/queue-control.js';
@@ -52,12 +48,14 @@ const elements = {
   ownerSignOut: document.querySelector('#owner-sign-out'),
   ownerAccountStatus: document.querySelector('#owner-account-status'),
   ownerPanelStatus: document.querySelector('#owner-panel-status'),
-  ownerClearForestCandidates: document.querySelector('#owner-clear-forest-candidates'),
   removedCandidateList: document.querySelector('#removed-candidate-list'),
+  loadMoreRemovedMarkers: document.querySelector('#load-more-removed-markers'),
   investigationServiceState: document.querySelector('#investigation-service-state'),
   investigationStatus: document.querySelector('#investigation-status'),
   startInvestigationQueue: document.querySelector('#start-investigation-queue'),
   stopInvestigationQueue: document.querySelector('#stop-investigation-queue'),
+  clearAllInvestigations: document.querySelector('#clear-all-investigations'),
+  clearAllHelp: document.querySelector('#clear-all-help'),
   investigationCronStatus: document.querySelector('#investigation-cron-status'),
   investigationCounts: document.querySelector('#investigation-counts'),
   investigationQuota: document.querySelector('#investigation-quota'),
@@ -81,11 +79,13 @@ let currentUser = null;
 let hasCandidateScan = false;
 let candidateStoreUnavailable = false;
 let reviewSync = null;
+let removedReviewLimit = 50;
 let approvedCandidates = [];
 let loadedApprovedCount = null;
 let investigationSummary = null;
 let investigationEntries = [];
 let queueSyncRunning = false;
+let clearAllInProgress = false;
 let queueRetryTimer = null;
 let investigationRefreshRunning = false;
 const queuedCandidateIds = new Set();
@@ -230,6 +230,7 @@ function restorePendingQueueLocally() {
 }
 
 function queueCandidateRecords(candidates) {
+  if (clearAllInProgress) return Promise.resolve();
   const activeCandidates = reviewStoreReady
     ? removePreviouslyRemovedCandidates(candidates, candidateReviews)
     : candidates;
@@ -256,14 +257,14 @@ function queueCandidateRecords(candidates) {
 }
 
 async function synchronizeInvestigationQueue() {
-  if (queueSyncRunning || !reviewStoreReady || !pendingQueueCandidates.size) return;
+  if (clearAllInProgress || queueSyncRunning || !reviewStoreReady || !pendingQueueCandidates.size) return;
   queueSyncRunning = true;
   if (queueRetryTimer) {
     window.clearTimeout(queueRetryTimer);
     queueRetryTimer = null;
   }
   try {
-    while (pendingQueueCandidates.size) {
+    while (pendingQueueCandidates.size && !clearAllInProgress) {
       const batch = [...pendingQueueCandidates.values()].slice(0, 50);
       await investigationApi('POST', { action: 'queue', candidates: batch });
       for (const candidate of batch) {
@@ -294,13 +295,19 @@ function countText(value) {
 }
 
 function renderInvestigationCounts(summary) {
-  elements.startInvestigationQueue.hidden = !isReviewOwner(currentUser);
+  const owner = isReviewOwner(currentUser);
+  elements.startInvestigationQueue.hidden = !owner;
   elements.startInvestigationQueue.disabled = summary.queue.active;
   elements.startInvestigationQueue.textContent = summary.queue.active
     ? 'Queue started · resumes automatically'
     : 'Start investigation queue';
-  elements.stopInvestigationQueue.hidden = !isReviewOwner(currentUser);
+  elements.stopInvestigationQueue.hidden = !owner;
   elements.stopInvestigationQueue.disabled = !summary.queue.active;
+  elements.clearAllInvestigations.disabled =
+    !owner || !reviewStoreReady || candidateStoreUnavailable || clearAllInProgress;
+  elements.clearAllHelp.textContent = owner
+    ? 'Clears all D1 investigation records and attempt history, stops the queue, and hides current candidate markers. Original Firebase scan evidence and today’s AI usage budget are retained.'
+    : 'Sign in with the owner Google account in the Owner review panel to clear investigations and map markers.';
   const cron = summary.queue.cron;
   if (!cron) {
     elements.investigationCronStatus.textContent =
@@ -1153,19 +1160,26 @@ function showCandidateStoreUnavailable(message) {
 
 function renderRemovedReviews() {
   elements.removedCandidateList.replaceChildren();
-  if (!isReviewOwner(currentUser)) return;
-  const removed = candidateReviews.filter((review) => review.removed);
+  if (!isReviewOwner(currentUser)) {
+    elements.loadMoreRemovedMarkers.hidden = true;
+    return;
+  }
+  const removed = candidateReviews
+    .filter((review) => review.removed)
+    .sort((first, second) => second.updatedAt - first.updatedAt);
   if (!removed.length) {
     const empty = document.createElement('p');
     empty.className = 'muted';
     empty.textContent = 'No removed markers. Remove a candidate from the results list to add it here.';
     elements.removedCandidateList.append(empty);
+    elements.loadMoreRemovedMarkers.hidden = true;
     return;
   }
   const heading = document.createElement('h3');
-  heading.textContent = `Removed markers (${formatCount(removed.length)})`;
+  heading.textContent =
+    `Removed markers (${formatCount(removed.length)} total; showing ${formatCount(Math.min(removed.length, removedReviewLimit))})`;
   elements.removedCandidateList.append(heading);
-  for (const review of removed) {
+  for (const review of removed.slice(0, removedReviewLimit)) {
     const row = document.createElement('div');
     row.className = 'removed-candidate-row';
     const details = document.createElement('span');
@@ -1189,19 +1203,13 @@ function renderRemovedReviews() {
     row.append(details, restore);
     elements.removedCandidateList.append(row);
   }
+  elements.loadMoreRemovedMarkers.hidden = removed.length <= removedReviewLimit;
 }
 
 function renderOwnerPanel() {
   const owner = isReviewOwner(currentUser);
   elements.ownerSignIn.hidden = owner;
   elements.ownerSignOut.hidden = !owner;
-  elements.ownerClearForestCandidates.hidden = !owner;
-  const forestCandidates = collectForestRunnerCandidates(candidateReviews, candidateSubmissions);
-  elements.ownerClearForestCandidates.textContent = forestCandidates.length
-    ? `Remove ${formatCount(forestCandidates.length)} old Forest Runner candidate(s)`
-    : 'Remove old Forest Runner candidates';
-  elements.ownerClearForestCandidates.disabled =
-    !owner || !reviewStoreReady || candidateStoreUnavailable;
   if (owner) {
     elements.ownerAccountStatus.textContent =
       `Owner signed in${currentUser.displayName ? ` as ${currentUser.displayName}` : ''}.`;
@@ -1632,6 +1640,10 @@ elements.clear.addEventListener('click', clearSelection);
 elements.scan.addEventListener('click', scanArea);
 elements.cancel.addEventListener('click', () => scanController?.abort());
 elements.loadMoreInvestigations.addEventListener('click', loadMoreInvestigations);
+elements.loadMoreRemovedMarkers.addEventListener('click', () => {
+  removedReviewLimit += 50;
+  renderRemovedReviews();
+});
 elements.startInvestigationQueue.addEventListener('click', async () => {
   elements.startInvestigationQueue.disabled = true;
   try {
@@ -1676,43 +1688,58 @@ elements.ownerSignOut.addEventListener('click', async () => {
     elements.ownerSignOut.disabled = false;
   }
 });
-elements.ownerClearForestCandidates.addEventListener('click', async () => {
-  const forestCandidates = collectForestRunnerCandidates(candidateReviews, candidateSubmissions);
-  const confirmation =
-    `Remove ${forestCandidates.length} old Forest Runner candidate location(s) from the shared map and delete their ` +
-    'still-pending investigation records? The queue will be stopped. Completed investigation history is retained.';
-  if (!window.confirm(confirmation)) return;
+elements.clearAllInvestigations.addEventListener('click', async () => {
+  if (!isReviewOwner(currentUser) || !reviewStoreReady || candidateStoreUnavailable) return;
+  const confirmed = window.confirm(
+    'Clear all investigations and attempt history from D1, stop the queue, and hide every currently known candidate marker? ' +
+      'Original Firebase scan evidence and today’s AI usage budget will be retained. This cannot be undone.',
+  );
+  if (!confirmed) return;
 
-  elements.ownerClearForestCandidates.disabled = true;
-  elements.ownerPanelStatus.textContent = 'Removing old Forest Runner candidates…';
+  clearAllInProgress = true;
+  elements.clearAllInvestigations.disabled = true;
+  elements.investigationStatus.textContent = 'Clearing investigations and hiding candidate markers…';
+  if (queueRetryTimer) {
+    window.clearTimeout(queueRetryTimer);
+    queueRetryTimer = null;
+  }
   try {
-    const removedRecords = await setForestRunnerCandidatesRemoved(
+    while (queueSyncRunning) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+    await investigationApi('POST', { action: 'stop' });
+    const removedRecords = await setAllCandidateRecordsRemoved(
       candidateReviews,
       candidateSubmissions,
+      approvedCandidates,
     );
     const removedById = new Map(removedRecords.map((record) => [record.id, record]));
     candidateReviews = [
       ...candidateReviews.filter((review) => !removedById.has(review.id)),
       ...removedRecords,
     ];
-    for (const [id, candidate] of pendingQueueCandidates) {
-      if (isForestRunnerCandidate(candidate)) pendingQueueCandidates.delete(id);
-    }
-    persistPendingQueueLocally();
     renderCandidateLayers();
     renderRemovedReviews();
-
-    const result = await investigationApi('POST', { action: 'clearForestRunnerBacklog' });
-    elements.ownerPanelStatus.textContent =
-      `Removed ${formatCount(removedRecords.length)} old Forest Runner location(s) and ` +
-      `${formatCount(result.deletedCount)} pending investigation(s). The queue is stopped; completed history was retained.`;
+    const cleared = await investigationApi('POST', { action: 'clearAll' });
+    pendingQueueCandidates.clear();
+    queuedCandidateIds.clear();
+    persistPendingQueueLocally();
+    approvedCandidates = [];
+    loadedApprovedCount = 0;
+    investigationEntries = [];
     setInvestigationError('');
     await refreshInvestigationData();
+    elements.investigationStatus.textContent =
+      `Cleared ${formatCount(cleared.deletedInvestigationCount)} investigation(s) and ` +
+      `${formatCount(cleared.deletedHistoryCount)} history record(s). The queue is stopped; current map markers are hidden.`;
   } catch (error) {
-    elements.ownerPanelStatus.textContent =
-      `Forest Runner cleanup was incomplete: ${error.message}. Refresh and retry; removed locations stay hidden.`;
+    setInvestigationError(`Could not complete the clear-all operation: ${error.message}`);
+    elements.investigationStatus.textContent =
+      'Clear all did not fully complete. The queue may already be stopped; review the error and retry.';
   } finally {
+    clearAllInProgress = false;
     renderOwnerPanel();
+    if (investigationSummary) renderInvestigationCounts(investigationSummary);
   }
 });
 

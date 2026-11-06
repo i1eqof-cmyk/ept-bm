@@ -4,7 +4,7 @@ import {
   canManuallyRetry,
   acquireProcessingLock,
   assertAiRunSucceeded,
-  clearPendingForestRunnerCandidates,
+  clearAllInvestigations,
   isQueueEnabled,
   isQueueOwner,
   isQuotaExceededError,
@@ -81,18 +81,28 @@ test('owner stop action persists the inactive queue state in D1', async () => {
   assert.deepEqual(binding, [123]);
 });
 
-test('forest cleanup stops the queue and deletes only pending forest-runner candidates', async () => {
+test('clear all stops the queue and deletes investigation rows and history', async () => {
   const state = {
     enabled: 1,
-    candidates: [
-      { status: 'pending', category: 'Forest LiDAR candidate (heuristic; 2018 survey)' },
-      { status: 'pending', category: 'Residential building' },
-      { status: 'approved', category: 'Forest LiDAR candidate (heuristic; 2018 survey)' },
-    ],
+    investigations: 3,
+    history: 5,
   };
   const database = {
     prepare(sql) {
-      return {
+      const statement = {
+        async run() {
+          if (sql.includes('DELETE FROM investigation_history')) {
+            const deleted = state.history;
+            state.history = 0;
+            return { meta: { changes: deleted } };
+          }
+          if (sql === 'DELETE FROM investigations') {
+            const deleted = state.investigations;
+            state.investigations = 0;
+            return { meta: { changes: deleted } };
+          }
+          throw new Error(`Unexpected cleanup SQL: ${sql}`);
+        },
         bind(...values) {
           return {
             async run() {
@@ -100,21 +110,12 @@ test('forest cleanup stops the queue and deletes only pending forest-runner cand
                 state.enabled = 0;
                 return { meta: { changes: 1 } };
               }
-              if (sql.includes('DELETE FROM investigations')) {
-                const categoryPrefix = values[0].replace('%', '');
-                const before = state.candidates.length;
-                state.candidates = state.candidates.filter(
-                  (candidate) =>
-                    candidate.status !== 'pending' ||
-                    !candidate.category.startsWith(categoryPrefix),
-                );
-                return { meta: { changes: before - state.candidates.length } };
-              }
               throw new Error(`Unexpected cleanup SQL: ${sql}`);
             },
           };
         },
       };
+      return statement;
     },
     async batch(statements) {
       const results = [];
@@ -123,14 +124,15 @@ test('forest cleanup stops the queue and deletes only pending forest-runner cand
     },
   };
 
-  const result = await clearPendingForestRunnerCandidates(database, 456);
+  const result = await clearAllInvestigations(database, 456);
 
-  assert.deepEqual(result, { deletedCount: 1 });
+  assert.deepEqual(result, {
+    deletedHistoryCount: 5,
+    deletedInvestigationCount: 3,
+  });
   assert.equal(state.enabled, 0);
-  assert.deepEqual(state.candidates, [
-    { status: 'pending', category: 'Residential building' },
-    { status: 'approved', category: 'Forest LiDAR candidate (heuristic; 2018 survey)' },
-  ]);
+  assert.equal(state.investigations, 0);
+  assert.equal(state.history, 0);
 });
 
 test('interrupted analysis recovers after its persisted lease expires', () => {

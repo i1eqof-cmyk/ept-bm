@@ -7,7 +7,6 @@ import {
 } from '@firebase/auth';
 import { onValue, ref, update } from '@firebase/database';
 import { firebaseAuth, firebaseDatabase, OWNER_UID } from './firebase.js';
-import { collectForestRunnerCandidates } from './forest-candidates.js';
 
 const REVIEW_PATH = 'candidateReviews';
 const SCAN_PATH = 'scanCandidates';
@@ -335,13 +334,18 @@ export async function setCandidateRemoved(review, removed) {
   await update(ref(firebaseDatabase, `${REVIEW_PATH}/${review.id}`), record);
 }
 
-export async function setForestRunnerCandidatesRemoved(reviews, submissions) {
+export async function setAllCandidateRecordsRemoved(reviews, submissions, approved = []) {
   if (!isReviewOwner(firebaseAuth.currentUser)) {
     throw new Error('Only the configured owner can change shared candidate reviews.');
   }
-  const targets = collectForestRunnerCandidates(reviews, submissions);
+  const targets = new Map(reviews.map((review) => [review.id, review]));
+  for (const candidate of [...submissions, ...approved]) {
+    if (typeof candidate?.id === 'string' && !targets.has(candidate.id)) {
+      targets.set(candidate.id, candidate);
+    }
+  }
   const reviewIds = new Set(reviews.map((review) => review.id));
-  const removedRecords = targets.map((candidate) => {
+  const removedRecords = [...targets.values()].map((candidate) => {
     const record = toReviewRecord(candidate, candidate.id, candidate);
     record.removed = true;
     record.updatedAt = Date.now();

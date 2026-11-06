@@ -12,19 +12,21 @@ export async function stopQueue(database, now) {
   ).bind(now).run();
 }
 
-export async function clearPendingForestRunnerCandidates(database, now) {
+export async function clearAllInvestigations(database, now) {
   const results = await database.batch([
     database.prepare(
       `INSERT INTO investigation_queue_control (id, enabled, updated_at) VALUES (1, 0, ?)
        ON CONFLICT(id) DO UPDATE SET enabled = 0, updated_at = excluded.updated_at`,
     ).bind(now),
     database.prepare(
-      `DELETE FROM investigations
-        WHERE status = 'pending'
-          AND json_extract(candidate_json, '$.category') LIKE ?`,
-    ).bind('Forest LiDAR candidate%'),
+      'DELETE FROM investigation_history',
+    ),
+    database.prepare('DELETE FROM investigations'),
   ]);
-  return { deletedCount: results[1]?.meta?.changes || 0 };
+  return {
+    deletedHistoryCount: results[1]?.meta?.changes || 0,
+    deletedInvestigationCount: results[2]?.meta?.changes || 0,
+  };
 }
 
 export async function acquireProcessingLock(database, leaseId, now, expiresAt) {

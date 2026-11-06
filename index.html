@@ -101,6 +101,12 @@
         <button id="stop-investigation-queue" class="secondary-button" type="button" hidden>
           Stop investigation queue
         </button>
+        <button id="clear-all-investigations" class="danger-button" type="button" disabled>
+          Clear all investigations and markers
+        </button>
+        <p id="clear-all-help" class="investigation-note">
+          Sign in with the owner Google account in the Owner review panel to clear investigations and map markers.
+        </p>
         <div id="investigation-counts" class="investigation-counts" aria-live="polite"></div>
         <p id="investigation-cron-status" class="investigation-note" aria-live="polite">
           Scheduled Worker status is loading.
@@ -126,13 +132,13 @@
         <div class="owner-panel-actions">
           <button id="owner-sign-in" class="secondary-button" type="button">Sign in with Google</button>
           <button id="owner-sign-out" class="secondary-button" type="button" hidden>Sign out</button>
-          <button id="owner-clear-forest-candidates" class="secondary-button" type="button" hidden>
-            Remove old Forest Runner candidates
-          </button>
           <span id="owner-account-status" role="status">Connecting to shared marker storage…</span>
         </div>
         <p id="owner-panel-status" class="owner-panel-status" role="status"></p>
         <div id="removed-candidate-list" class="removed-candidate-list"></div>
+        <button id="load-more-removed-markers" class="secondary-button" type="button" hidden>
+          Show more removed markers
+        </button>
       </details>
 
       <details class="diagnostics-panel">
