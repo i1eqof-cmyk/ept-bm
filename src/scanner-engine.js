@@ -451,6 +451,10 @@ function pointGrid(tiles) {
           nonGroundSum: 0,
           nonGroundMinZ: Infinity,
           nonGroundMaxZ: -Infinity,
+          structureCount: 0,
+          structureSum: 0,
+          structureMinZ: Infinity,
+          structureMaxZ: -Infinity,
           class6Count: 0,
           class3Count: 0,
           class4Count: 0,
@@ -469,6 +473,12 @@ function pointGrid(tiles) {
         cell.nonGroundSum += z;
         cell.nonGroundMinZ = Math.min(cell.nonGroundMinZ, z);
         cell.nonGroundMaxZ = Math.max(cell.nonGroundMaxZ, z);
+        if (classification < 3 || classification > 5) {
+          cell.structureCount += 1;
+          cell.structureSum += z;
+          cell.structureMinZ = Math.min(cell.structureMinZ, z);
+          cell.structureMaxZ = Math.max(cell.structureMaxZ, z);
+        }
       }
       if (classification === 3) {
         cell.class3Count += 1;
@@ -480,7 +490,7 @@ function pointGrid(tiles) {
         cell.class5Count += 1;
         cell.vegetationCount += 1;
       } else if (classification === 6) cell.class6Count += 1;
-      else cell.otherCount += 1;
+      else if (classification !== 2) cell.otherCount += 1;
     }
   }
   return cells;
@@ -504,12 +514,29 @@ function groupCandidateCells(cells) {
       cell.localGroundZ === null ? null : cell.nonGroundMeanZ - cell.localGroundZ;
     cell.roughness =
       cell.nonGroundMaxZ - cell.nonGroundMinZ;
+    cell.structureMeanZ = cell.structureCount
+      ? cell.structureSum / cell.structureCount
+      : null;
+    cell.structureRelativeHeight =
+      cell.structureMeanZ === null || cell.localGroundZ === null
+        ? null
+        : cell.structureMeanZ - cell.localGroundZ;
+    cell.structureRoughness =
+      cell.structureCount
+        ? cell.structureMaxZ - cell.structureMinZ
+        : Infinity;
     cell.vegetationShare =
       cell.count > 0 ? cell.vegetationCount / cell.count : 0;
     cell.elevated = cell.relativeHeight !== null && cell.relativeHeight > 1.5;
     cell.planar = cell.roughness <= 0.75;
+    cell.structureElevated =
+      cell.structureRelativeHeight !== null && cell.structureRelativeHeight > 1.5;
+    cell.structurePlanar = cell.structureRoughness <= 0.75;
     cell.eligible =
-      (cell.elevated && (cell.class6Count > 0 || (cell.planar && cell.vegetationShare < 0.7))) ||
+      (cell.elevated &&
+        (cell.class6Count > 0 ||
+          (cell.structureElevated && cell.structureCount >= 3 && cell.structurePlanar) ||
+          (cell.planar && cell.vegetationShare < 0.7))) ||
       (!cell.elevated && cell.localGroundZ === null && cell.class6Count >= 3);
   }
 
@@ -559,6 +586,7 @@ function scoreCandidate(group) {
   const areaSquareMeters =
     group.length * PROGRESSIVE_POINT_GRID_METERS ** 2;
   const pointCount = group.reduce((sum, cell) => sum + cell.count, 0);
+  const structurePointCount = group.reduce((sum, cell) => sum + cell.structureCount, 0);
   const groundPointCount = group.reduce((sum, cell) => sum + cell.groundCount, 0);
   const class6Count = group.reduce((sum, cell) => sum + cell.class6Count, 0);
   const class3Count = group.reduce((sum, cell) => sum + cell.class3Count, 0);
@@ -568,12 +596,15 @@ function scoreCandidate(group) {
   const otherCount = group.reduce((sum, cell) => sum + cell.otherCount, 0);
   const groundCells = group.filter((cell) => cell.localGroundZ !== null);
   const elevatedCells = group.filter((cell) => cell.elevated);
-  const planarCells = elevatedCells.filter((cell) => cell.planar);
+  const structureElevatedCells = group.filter((cell) => cell.structureElevated);
+  const planarCells = structureElevatedCells.filter(
+    (cell) => cell.structureCount >= 3 && cell.structurePlanar,
+  );
   const roughnessValues = elevatedCells.map((cell) => cell.roughness);
   const medianRoughness = median(roughnessValues);
   const groundCoverage = group.length ? groundCells.length / group.length : 0;
-  const planarCoverage = elevatedCells.length
-    ? planarCells.length / elevatedCells.length
+  const planarCoverage = structureElevatedCells.length
+    ? planarCells.length / structureElevatedCells.length
     : 0;
   const vegetationShare = pointCount ? vegetationCount / pointCount : 0;
   const class6Share = pointCount ? class6Count / pointCount : 0;
@@ -592,14 +623,14 @@ function scoreCandidate(group) {
   } else {
     evidence.push(`+0 insufficient local Class 2 ground coverage (${Math.round(groundCoverage * 100)}%)`);
   }
-  if (planarCoverage >= 0.7 && elevatedCells.length >= 4) {
+  if (planarCoverage >= 0.7 && structureElevatedCells.length >= 4) {
     score += 25;
-    evidence.push(`+25 ${Math.round(planarCoverage * 100)}% of elevated cells have roughness ≤ 0.75 LAS Z units`);
-  } else if (planarCoverage >= 0.4 && elevatedCells.length >= 2) {
+    evidence.push(`+25 ${Math.round(planarCoverage * 100)}% of ground-relative elevated cells have planar non-vegetation returns`);
+  } else if (planarCoverage >= 0.4 && structureElevatedCells.length >= 2) {
     score += 12;
-    evidence.push(`+12 ${Math.round(planarCoverage * 100)}% of elevated cells have roughness ≤ 0.75 LAS Z units`);
+    evidence.push(`+12 ${Math.round(planarCoverage * 100)}% of ground-relative elevated cells have planar non-vegetation returns`);
   } else {
-    evidence.push(`+0 weak planar coverage (${Math.round(planarCoverage * 100)}% of elevated cells)`);
+    evidence.push(`+0 weak planar non-vegetation returns (${Math.round(planarCoverage * 100)}% of ground-relative elevated cells)`);
   }
   if (aspectRatio <= 4) {
     score += 15;
@@ -650,6 +681,9 @@ function scoreCandidate(group) {
     evidence,
     dimensions: { widthMeters, lengthMeters, areaSquareMeters, aspectRatio },
     pointCount,
+    structurePointCount,
+    structurePlanarCellCount: planarCells.length,
+    structureElevatedCellCount: structureElevatedCells.length,
     classificationCounts: {
       2: groundPointCount,
       3: class3Count,
@@ -711,8 +745,17 @@ export function detectCandidates(tiles, geographicBounds) {
       gates.insufficientGroundSupport &&
       gates.insufficientPlanarity &&
       gates.excessiveVegetation;
-    if (roofCandidate) roofGeometryGroups += 1;
-    if (!class6Candidate && !roofCandidate) {
+    const canopySupportedRoof =
+      gates.belowMinimumFootprint &&
+      gates.belowMinimumPointCount &&
+      gates.insufficientGroundSupport &&
+      metrics.vegetationShare >= 0.7 &&
+      metrics.vegetationShare < 0.9 &&
+      metrics.structurePointCount >= 20 &&
+      metrics.structurePlanarCellCount >= 4 &&
+      metrics.planarCoverage >= 0.65;
+    if (roofCandidate || canopySupportedRoof) roofGeometryGroups += 1;
+    if (!class6Candidate && !roofCandidate && !canopySupportedRoof) {
       for (const [gate, passed] of Object.entries(gates)) {
         if (!passed) rejectedGroups[gate] += 1;
       }
@@ -721,7 +764,9 @@ export function detectCandidates(tiles, geographicBounds) {
     metrics.evidence.unshift(
       class6Candidate
         ? `Candidate gate: ≥10 Class 6 returns across at least 2 connected cells.`
-        : 'Candidate gate: ≥25 m², ≥40 points, ≥35% local ground coverage, ≥40% planar elevated cells, and vegetation share <70%.',
+        : canopySupportedRoof
+          ? `Canopy-supported roof geometry: ${metrics.structurePointCount} non-vegetation returns; ${metrics.structurePlanarCellCount} ground-relative elevated cells have planar structural returns; vegetation returns are ${Math.round(metrics.vegetationShare * 100)}% of the cluster.`
+          : 'Candidate gate: ≥25 m², ≥40 points, ≥35% local ground coverage, ≥40% planar elevated cells, and vegetation share <70%.',
     );
 
     const localX =
@@ -768,6 +813,9 @@ export function detectCandidates(tiles, geographicBounds) {
   const nonGroundCells = [...cells.values()].filter((cell) => cell.nonGroundCount > 0);
   const elevatedCells = nonGroundCells.filter((cell) => cell.elevated);
   const planarElevatedCells = elevatedCells.filter((cell) => cell.planar);
+  const structuralPlanarElevatedCells = nonGroundCells.filter(
+    (cell) => cell.structureElevated && cell.structureCount >= 3 && cell.structurePlanar,
+  );
   return {
     candidates,
     totalCandidateCount: candidates.length,
@@ -779,6 +827,7 @@ export function detectCandidates(tiles, geographicBounds) {
       groundSupportedCellCount: nonGroundCells.filter((cell) => cell.localGroundZ !== null).length,
       elevatedCellCount: elevatedCells.length,
       planarElevatedCellCount: planarElevatedCells.length,
+      structuralPlanarElevatedCellCount: structuralPlanarElevatedCells.length,
       eligibleCellCount: nonGroundCells.filter((cell) => cell.eligible).length,
       connectedGroupCount: groups.length,
       class6GroupCount: class6Groups,

@@ -17,6 +17,7 @@ import {
   prepareScannedCandidates,
   saveScannedCandidates,
   setCandidateRemoved,
+  setAllCandidateRecordsRemoved,
   signInOwnerWithGoogle,
   signOutOwner,
 } from './candidate-reviews.js';
@@ -42,6 +43,7 @@ const elements = {
   ownerSignOut: document.querySelector('#owner-sign-out'),
   ownerAccountStatus: document.querySelector('#owner-account-status'),
   ownerPanelStatus: document.querySelector('#owner-panel-status'),
+  clearAllCandidates: document.querySelector('#clear-all-candidates'),
   removedCandidateList: document.querySelector('#removed-candidate-list'),
   loadMoreRemovedMarkers: document.querySelector('#load-more-removed-markers'),
 };
@@ -226,7 +228,7 @@ function clearResults() {
   renderCandidateLayers();
   elements.viewerTitle.textContent = 'Waiting for real EPT points';
   elements.viewerCount.textContent = '0 points';
-  showCandidates(candidateSubmissions, candidateSubmissions.length);
+  showCandidates(candidateSubmissions);
   elements.diagnostics.replaceChildren();
   appendDiagnostic('Status', 'No scan run');
   if (renderer) renderer.clear();
@@ -557,21 +559,23 @@ function addCandidateRow(candidate) {
   elements.candidateList.append(article);
 }
 
-function showCandidates(candidates, totalCandidateCount = candidates.length) {
-  displayedCandidates = candidates;
+function showCandidates(candidates) {
+  displayedCandidates = candidates.filter(
+    (candidate) => !getCandidateMatch(candidate, candidateReviews)?.removed,
+  );
   hasCandidateScan = true;
   renderCandidateLayers();
   elements.candidateList.replaceChildren();
-  const high = candidates.filter((candidate) =>
+  const high = displayedCandidates.filter((candidate) =>
     candidate.confidence === 'High' || (!candidate.confidence && candidate.score >= 75),
   ).length;
-  const medium = candidates.filter((candidate) =>
+  const medium = displayedCandidates.filter((candidate) =>
     candidate.confidence === 'Medium' ||
     (!candidate.confidence && candidate.score >= 50 && candidate.score < 75),
   ).length;
-  const low = candidates.length - high - medium;
-  elements.candidateTitle.textContent = totalCandidateCount
-    ? `${formatCount(totalCandidateCount)} LiDAR candidate(s)`
+  const low = displayedCandidates.length - high - medium;
+  elements.candidateTitle.textContent = displayedCandidates.length
+    ? `${formatCount(displayedCandidates.length)} LiDAR candidate(s)`
     : 'No candidate detections yet';
   elements.candidateSummary.replaceChildren();
   for (const [label, value] of [
@@ -585,7 +589,7 @@ function showCandidates(candidates, totalCandidateCount = candidates.length) {
     chip.textContent = `${label}: ${value}`;
     elements.candidateSummary.append(chip);
   }
-  if (!candidates.length) {
+  if (!displayedCandidates.length) {
     const message = document.createElement('p');
     message.className = 'muted';
     message.textContent =
@@ -593,7 +597,7 @@ function showCandidates(candidates, totalCandidateCount = candidates.length) {
     elements.candidateList.append(message);
     return;
   }
-  for (const candidate of candidates) {
+  for (const candidate of displayedCandidates) {
     addCandidateRow(candidate);
   }
 }
@@ -665,6 +669,9 @@ function renderOwnerPanel() {
   const owner = isReviewOwner(currentUser);
   elements.ownerSignIn.hidden = owner;
   elements.ownerSignOut.hidden = !owner;
+  elements.clearAllCandidates.hidden = !owner;
+  elements.clearAllCandidates.disabled =
+    !owner || !reviewStoreReady || displayedCandidates.length === 0;
   if (owner) {
     elements.ownerAccountStatus.textContent =
       `Owner signed in${currentUser.displayName ? ` as ${currentUser.displayName}` : ''}.`;
@@ -685,7 +692,7 @@ function renderOwnerPanel() {
       : 'Connecting to shared marker storage…';
   renderRemovedReviews();
   if (reviewStoreReady && !candidateStoreUnavailable) {
-    showCandidates(candidateSubmissions, candidateSubmissions.length);
+    showCandidates(candidateSubmissions);
   }
 }
 
@@ -1028,7 +1035,7 @@ async function scanArea() {
     renderCandidateLayers();
     renderRemovedReviews();
     scan.totalCandidateCount = analysis.totalCandidateCount;
-    showCandidates(candidateSubmissions, candidateSubmissions.length);
+    showCandidates(candidateSubmissions);
     const fps = renderer ? await sampleFps() : null;
     const scanElapsedMs = performance.now() - scanStarted;
     elements.viewerTitle.textContent = rendererError
@@ -1121,6 +1128,35 @@ elements.loadMoreRemovedMarkers.addEventListener('click', () => {
   removedReviewLimit += 50;
   renderRemovedReviews();
 });
+elements.clearAllCandidates.addEventListener('click', async () => {
+  if (!isReviewOwner(currentUser) || !reviewStoreReady || !candidateSubmissions.length) {
+    return;
+  }
+  const confirmed = window.confirm(
+    `Hide all ${candidateSubmissions.length.toLocaleString()} shared candidates and map markers for everyone? Original LiDAR scan records will be kept.`,
+  );
+  if (!confirmed) return;
+  elements.clearAllCandidates.disabled = true;
+  elements.ownerPanelStatus.textContent = 'Clearing shared candidates and markers…';
+  let finalStatus;
+  try {
+    candidateReviews = await setAllCandidateRecordsRemoved(
+      candidateReviews,
+      candidateSubmissions,
+    );
+    showCandidates(candidateSubmissions);
+    renderCandidateLayers();
+    renderRemovedReviews();
+    finalStatus =
+      `Cleared ${candidateSubmissions.length.toLocaleString()} shared candidate(s) and markers. Original LiDAR scan records were kept.`;
+  } catch (error) {
+    finalStatus =
+      `Could not clear all candidates and markers: ${error.message}`;
+  } finally {
+    renderOwnerPanel();
+    elements.ownerPanelStatus.textContent = finalStatus;
+  }
+});
 elements.ownerSignIn.addEventListener('click', async () => {
   elements.ownerSignIn.disabled = true;
   elements.ownerPanelStatus.textContent = 'Opening Google sign-in…';
@@ -1165,7 +1201,7 @@ reviewSync = listenToCandidateReviews(
     candidateStoreUnavailable = false;
     displayedCandidates = submissions;
     renderCandidateLayers();
-    showCandidates(submissions, submissions.length);
+    showCandidates(submissions);
     renderOwnerPanel();
   },
   (error) => {

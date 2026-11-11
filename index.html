@@ -95,6 +95,12 @@
           <span id="owner-account-status" role="status">Connecting to shared marker storage…</span>
         </div>
         <p id="owner-panel-status" class="owner-panel-status" role="status"></p>
+        <button id="clear-all-candidates" class="danger-button" type="button" hidden disabled>
+          Clear all candidates and markers
+        </button>
+        <p class="owner-panel-note">
+          Clearing hides shared markers for everyone but keeps the original LiDAR scan records. You can scan again later; cleared locations stay suppressed.
+        </p>
         <div id="removed-candidate-list" class="removed-candidate-list"></div>
         <button id="load-more-removed-markers" class="secondary-button" type="button" hidden>
           Show more removed markers

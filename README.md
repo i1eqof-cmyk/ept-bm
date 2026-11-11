@@ -78,15 +78,21 @@ intersecting item documents; they do not fetch all survey point clouds.
   from browser-reported core/memory hints.
 - Class 6 returns are kept as a separate evidence category. Other candidates
   require connected elevated cells and roof-like geometry; class 3–5 vegetation
-  share reduces confidence. Ground-relative checks use nearby Class 2 samples
-  in a local grid, not a fabricated ground surface.
+  share reduces confidence. In wooded areas, a secondary path can retain a
+  candidate when ground-relative planar non-vegetation returns provide roof
+  evidence beneath a vegetation-dominated cluster. A canopy-only cluster is
+  still rejected. Ground-relative checks use nearby Class 2 samples in a local
+  grid, not a fabricated ground surface.
 - The candidate grid is 2.5 m. A cell is considered elevated only when its
   non-ground mean exceeds the median nearby Class 2 cell elevation by more than
   1.5 LAS Z units. A planar cell has a non-ground Z range no greater than 0.75
-  LAS Z units. Class 2 search extends three grid cells. Non-Class-6 candidates
-  also require at least 25 m², 40 returns, 35% local ground coverage, 40%
-  planar elevated cells, and less than 70% vegetation returns. Class 6
-  components require 10 such returns in at least two connected cells.
+  LAS Z units. Class 2 search extends three grid cells. Standard non-Class-6
+  candidates require at least 25 m², 40 returns, 35% local ground coverage,
+  40% planar elevated cells, and less than 70% vegetation returns. A separate
+  canopy-supported path requires at least 20 elevated non-vegetation returns,
+  four planar cells, at least 65% structural planarity, and vegetation between
+  70% and 90%; this avoids approving canopy-only groups. Class 6 components
+  require 10 such returns in at least two connected cells.
 - Scores add evidence for local ground support (up to 20), planar elevated
   cells (up to 25), compact geometry (up to 15), footprint area (10), density
   (10), and Class 6 (up to 15); substantial vegetation subtracts 10 or 25.
@@ -175,9 +181,12 @@ remain suppressed until restored in the Owner review panel. Candidate scoring
 and spatial matching are heuristic; a nearby, distinct structure may also be
 suppressed, so review restored markers carefully.
 
-The owner can remove individual shared markers; removed locations stay
-suppressed when later scans find them. Existing investigation records are
-preserved as historical data and are not processed by the updated Cron Worker.
+The owner can remove individual shared markers or use **Clear all candidates
+and markers** in the Owner review panel. Clear-all suppresses all known shared
+candidates for every visitor but preserves the Firebase scan records. Removed
+locations stay suppressed when later scans find them. Existing investigation
+records are preserved as historical data and are not processed by the updated
+Cron Worker.
 
 Before deploying, apply the rules in `database.rules.json` to the Realtime
 Database. If the project already has other data/rules, merge both the
