@@ -5,11 +5,3 @@ workers_dev = false
 
 [triggers]
 crons = ["* * * * *"]
-
-[ai]
-binding = "AI"
-
-[[d1_databases]]
-binding = "DB"
-database_name = "REPLACE_WITH_EXISTING_D1_DATABASE_NAME"
-database_id = "REPLACE_WITH_EXISTING_D1_DATABASE_ID"

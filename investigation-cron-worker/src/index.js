@@ -1,16 +1,9 @@
-import { processNextCandidate } from '../../functions/api/investigations.js';
-import { runScheduledInvocation } from '../../functions/_lib/cron-runner.js';
-
-export function executeScheduledTick(env, processor = processNextCandidate) {
-  return runScheduledInvocation(env, processor);
+export function executeScheduledTick() {
+  return { status: 'disabled' };
 }
 
 export default {
-  async scheduled(_controller, env, context) {
-    context.waitUntil(
-      executeScheduledTick(env).catch((error) => {
-        console.error('Scheduled investigation invocation failed.', error);
-      }),
-    );
+  scheduled() {
+    console.info('AI candidate investigation is disabled; no candidates were processed.');
   },
 };

@@ -4,10 +4,10 @@ The main page is a map-first browser scanner. Search for a location, draw a
 rectangle, and choose **Scan Area**. The browser discovers public USGS 3DEP
 coverage, validates EPT resources, progressively downloads intersecting LAZ
 nodes, decodes them in Web Workers, and renders actual returned points with
-WebGL. Candidate detections enter a persistent investigation queue; only
-approved investigations appear as normal map markers. Scan measurements are
-available in the optional **Scan Diagnostics** panel. The manual benchmark
-remains at `advanced-benchmark.html`.
+WebGL. LiDAR heuristic candidates are saved to Firebase and displayed
+immediately as map markers; they are unverified leads, not confirmed
+buildings. Scan measurements are available in the optional **Scan Diagnostics**
+panel. The manual benchmark remains at `advanced-benchmark.html`.
 
 ## Run locally on Windows
 
@@ -18,9 +18,9 @@ npm.cmd run dev
 ```
 
 Open the local URL printed by Vite. Static scanning and the existing benchmark
-work locally. The investigation API requires Cloudflare Pages Functions and
-its D1/Workers AI bindings; a plain Vite server does not provide those
-bindings.
+work locally. Firebase-backed shared markers require the configured Firebase
+project; a plain Vite server does not provide the legacy Cloudflare Functions
+API.
 
 Build the static site for deployment:
 
@@ -29,10 +29,9 @@ npm.cmd run build
 ```
 
 The deployable site is in `dist`. Cloudflare Pages must build from this
-directory with `npm run build` and output directory `dist`. Keep the root
-`functions/` directory in the connected project so Pages deploys the
-investigation API with the static site. A static-only host can still serve the
-scanner, but cannot provide the persistent AI investigation service.
+directory with `npm run build` and output directory `dist`. The `functions/`
+directory contains legacy investigation endpoints but is not used by the
+current direct-marker website flow.
 
 ## Automatic dataset discovery
 
@@ -92,9 +91,9 @@ intersecting item documents; they do not fetch all survey point clouds.
   cells (up to 25), compact geometry (up to 15), footprint area (10), density
   (10), and Class 6 (up to 15); substantial vegetation subtracts 10 or 25.
   Scores are capped at 44 when local ground coverage is below 35%. High is
-  75–100, medium is 50–74, and low is below 50. All generated candidate
-  records are sent in bounded batches to the investigation queue; the browser
-  does not silently drop candidates after the first 500.
+  75–100, medium is 50–74, and low is below 50. Candidate records are saved
+  to Firebase and displayed immediately without
+  an AI review queue.
 - Per-candidate LiDAR evidence includes total point count, counts for Classes
   2–6 and other classes, Class 6 and vegetation shares, ground coverage,
   planar coverage, roughness, density, and ground-relative height. Missing
@@ -104,6 +103,10 @@ intersecting item documents; they do not fetch all survey point clouds.
   they are not building confirmations. A missing candidate does not prove a
   building is absent; a structure with no useful roof or wall returns in the
   selected LiDAR data cannot be reliably recovered by this scanner.
+- When a scan finds no candidates, Scan Diagnostics report the in-box point
+  classification counts, local-ground-supported and elevated/planar grid cells,
+  connected groups, and how many groups failed each candidate gate. A large
+  total point count alone does not establish that roof returns were present.
 - Height and relative-height values remain **LAS Z units**. The app does not
   assume the vertical unit or reference.
 - For browser memory safety, each rectangle side is limited to 2,000 m. Before
@@ -117,121 +120,16 @@ intersecting item documents; they do not fetch all survey point clouds.
   box or use a desktop point-cloud workflow when a scan exceeds its limit. The
   scanner never silently truncates a completed scan to meet its display budget.
 
-## Persistent AI investigations
+## Direct LiDAR candidate markers
 
-The Cloudflare Pages Function at `functions/api/investigations.js` stores the
-queue, current status, reports, and prior attempts in D1. Existing Firebase
-scan records are retained and synchronized into D1 when the site is visited;
-new detections are saved to Firebase and queued in batches. A small
-`localStorage` backup retains unsent batches if the Pages API is unavailable.
-and synchronized into D1 when the site is visited; run a scan or open the
-website to synchronize new Firebase records. The independent
-`investigation-cron-worker/` Worker uses a `* * * * *` Cron Trigger and the
-same D1 database and Workers AI binding. After the configured owner starts the
-queue once in the website, that Worker processes at most one candidate per
-scheduled invocation. The website and browser can be closed.
+Candidate clusters that pass the scanner's LiDAR heuristic are saved to Firebase and displayed immediately as candidate markers; there is no AI approval or investigation queue in the website flow. These are unverified leads, not confirmed buildings. The scanner still applies its geometry and vegetation gates, and a scan with no useful roof or wall returns cannot reliably detect a hidden structure.
 
-The owner can start or stop the persistent queue in the website. Other visitors
-can contribute candidate records but cannot start/stop the queue or invoke AI.
-Each result (including its attempt-history row) is committed in one awaited D1
-batch before the invocation returns. The D1 atomic global lock prevents
-overlapping Pages/Cron processors, and a 16-minute lease protects work across
-the maximum Cron wall-time window. Expired `analyzing` records are recovered.
-Completed `approved`, `rejected`, `uncertain`, and `error` candidates are not
-automatically selected again; only the owner retry action can queue an
-`uncertain` or `error` record again. A crash after the external model call but
-before D1 commits can repeat that unfinished call; exactly-once remote
-inference cannot be guaranteed.
+Owner sign-in continues to support removing/restoring shared marker locations. Existing D1 investigation records, Firebase scan submissions, and prior reports are retained as historical data; the site no longer synchronizes new scans into D1. The standalone Cron Worker is disabled in this source version. Deploy the updated Worker if it was previously installed, otherwise an older deployed Worker could continue processing an already-active D1 queue.
+### Cloudflare Pages and legacy AI Worker
 
-The app's 4,000-Neuron daily cap and Cloudflare quota errors pause the backlog
-in D1; the Cron Worker resumes quota-paused records after the next UTC reset.
-The website's investigation panel displays the last scheduled run, status,
-candidate, invocation count, saved errors, queue counts, and remaining app
-budget. A candidate-level error is saved and does not stop later Cron runs.
+Deploy the website through Cloudflare Pages with project root `forgh`, build command `npm run build`, and output directory `dist`. Keep Firebase Anonymous and Google authentication enabled, use the rules in `database.rules.json`, and authorize the deployed domain. The configured owner signs in with the Google account whose UID is in `shared/owner.js` to remove or restore shared markers.
 
-The visual model is Cloudflare Workers AI
-`@cf/meta/llama-3.2-11b-vision-instruct`, called only through the server-side
-`AI` binding. It receives a bounded 512 × 512 USGS/USDA NAIP image export plus
-the LiDAR measurements/classification counts and nearby OpenStreetMap
-Overpass building/land-use context. Nearby houses alone do not reject a
-candidate; absent map tags are not positive evidence. An unavailable image
-produces an uncertain report rather than a made-up visual assessment.
-
-Approval requires all of the following:
-
-- The model classifies the target as `likely_non_residential` and its
-  confidence meets `AI_APPROVAL_CONFIDENCE` (default 0.85).
-- The report includes positive evidence and observations from the image.
-- Independent LiDAR evidence has at least 40 points, 25 m² estimated footprint,
-  35% local Class 2 ground coverage, and more than 1.5 LAS Z units relative
-  height, plus either at least 10 Class 6 returns or at least 40% planar
-  coverage with less than 65% vegetation share.
-- Direct residential map-tag conflict blocks approval. Nearby residential
-  context alone does not.
-
-These are conservative heuristics, not proof of property use. The project
-never assesses occupancy, vacancy, abandonment, ownership, or safety. A
-structure with no useful LiDAR roof or wall returns cannot be reliably detected.
-LiDAR Z units and vertical datum remain unverified.
-
-### Cloudflare Pages setup
-
-1. In Pages project settings, set the project root to `forgh`, the build command
-   to `npm run build`, and the build output directory to `dist`.
-2. Use the existing D1 database. In its SQL console, run `functions/schema.sql`
-   to safely add any missing queue and Cron telemetry tables. Do not create a
-   second D1 database. `IF NOT EXISTS` retains existing investigation history.
-3. In **Workers & Pages → your Pages project → Settings → Bindings**, add a D1
-   binding named `DB` and select that database.
-4. In the same **Bindings** screen, add a **Workers AI** binding named `AI`.
-   Select both Production and Preview environments as applicable, then
-   redeploy. The function intentionally returns a configuration error if this
-   binding is absent; there is no frontend token and no alternate paid model.
-5. Add these Pages Function environment variables in the applicable
-   Production/Preview environments:
-
-   | Variable | Value |
-   | --- | --- |
-   | `FIREBASE_PROJECT_ID` | `dep-lidar-scan` |
-   | `AI_APPROVAL_CONFIDENCE` | `0.85` |
-
-   The Firebase owner UID is defined once in `shared/owner.js`, shared by the
-   browser and Pages Function, and does not need a separate Pages environment
-   variable. The function validates Firebase ID-token signatures; do not add a
-   Cloudflare API token to browser code.
-6. Review Meta's Llama 3.2 license and acceptable-use policy. Cloudflare
-   requires a one-time initial request to this model with prompt `agree`.
-   Explicitly do this in Cloudflare's Workers AI Playground only after
-   accepting those terms. The application does not accept a license on your
-   behalf. If the terms have not been accepted, the candidate receives an
-   error report and can be retried after setup.
-7. Keep the Cloudflare account on the **Workers Free** plan and do not enable
-   paid usage or add an automatic billing fallback. Cloudflare currently
-   documents 10,000 free Neurons per account per UTC day; this project reserves
-   at most 4,000 estimated Neurons per UTC day (about 20 bounded image reviews
-   at its current estimate) and pauses the queue when its budget or Cloudflare
-   quota is exhausted. The account allocation is shared with other workloads;
-   they may consume it first. On the Free plan, excess operations fail rather
-   than switching to another model. A Workers Paid account can incur charges
-   beyond its free allocation, so do not upgrade if zero billing is required.
-8. Keep Firebase Anonymous and Google Authentication enabled and add the
-   deployed Pages domain to Firebase's authorized domains. Sign in with the
-   configured owner Google account and click **Start investigation queue**
-   once. The active state persists in D1; the website need not stay open.
-
-### Deploy the independent Cron Worker
-
-The checked-in configuration is
-`investigation-cron-worker/wrangler.toml`. Before deployment, replace
-`REPLACE_WITH_EXISTING_D1_DATABASE_NAME` and
-`REPLACE_WITH_EXISTING_D1_DATABASE_ID` with the name and ID of the same D1
-database bound to Pages. Find the database ID in the Cloudflare dashboard under
-**Workers & Pages → D1 SQL Database → your existing database → Overview**.
-The configuration binds that database as `DB`, binds Workers AI as `AI`, and
-sets the required `* * * * *` schedule. `workers_dev = false` and the absence
-of a `fetch` handler mean the Worker has no public HTTP endpoint.
-
-From PowerShell:
+The active website no longer calls the investigation API, D1, or Workers AI. Existing D1 investigation/history data and Firebase scan records are intentionally left untouched. The standalone Cron Worker is changed to a no-op so it cannot process an old active queue. If you already deployed that Worker, deploy this updated code from `forgh/investigation-cron-worker`:
 
 ```powershell
 Set-Location C:\Users\C\Pictures\BuildingLocator\forgh\investigation-cron-worker
@@ -239,46 +137,10 @@ npx wrangler login
 npx wrangler deploy
 ```
 
-Deploy this Worker independently from the Pages build. If the account does not
-allow AI bindings from Wrangler configuration, add the Workers AI binding
-named `AI` to the Worker in **Workers & Pages → your Worker → Settings →
-Bindings**, then redeploy. Verify **Settings → Triggers → Cron Triggers** shows
-`* * * * *`; trigger changes can take several minutes to propagate. No
-Cloudflare API token, paid Queue, Workflow, Durable Object, second database,
-or paid inference fallback is used.
-
-Cloudflare's current Workers Free limits allow 10 ms CPU per Cron invocation
-and 15 minutes wall time per Cron invocation. The handler makes only one
-candidate attempt, uses asynchronous fetch/AI binding calls, caps the image
-payload at 512 KiB, and caps public-map context parsing at 128 KiB. CPU is the
-main practical constraint: if one invocation consistently exceeds 10 ms of
-JavaScript CPU, Cloudflare will terminate it regardless of the wall-time
-allowance. This code keeps the per-invocation image/context bounds small, but
-actual Cloudflare CPU measurements must be checked in Workers invocation
-logs after deployment. If an invocation is interrupted, its 16-minute D1 lease
-expires and the unfinished candidate is retried. One invocation per minute is
-at most 1,440 Cron requests/day, below the 100,000 Free daily Worker request
-limit. D1 Free currently allows 100,000 row writes/day; this single-candidate
-schedule is below that allowance under normal queue use.
-
-Cloudflare setup and current quota/model terms were checked against its
-[Workers AI pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/),
-[Llama vision model](https://developers.cloudflare.com/workers-ai/models/llama-3.2-11b-vision-instruct/),
-[Workers limits](https://developers.cloudflare.com/workers/platform/limits/),
-[Cron Triggers](https://developers.cloudflare.com/workers/configuration/cron-triggers/),
-[D1 pricing](https://developers.cloudflare.com/d1/platform/pricing/),
-[Pages Functions bindings](https://developers.cloudflare.com/pages/functions/bindings/),
-and [Workers AI bindings](https://developers.cloudflare.com/workers-ai/configuration/bindings/)
-documentation. The bounded NAIP imagery endpoint is USGS/USDA public-domain
-orthophotography; reports identify its source. OpenStreetMap context is
-attributed in the report and treated as incomplete evidence. Reports also
-show investigation elapsed time and the downloaded image and map-context
-payload sizes; these are payload sizes, not a measure of compressed network
-traffic.
-
+Alternatively, remove its Cron Trigger in Cloudflare Dashboard → **Workers & Pages → your Worker → Settings → Triggers**. Until the old Worker is redeployed or its trigger is removed, an older deployment could continue processing a previously started D1 queue. No database IDs, AI binding, paid plan, or AI license setup are needed for this direct-marker workflow.
 ### Testing
 
-Run local deterministic approval-gate tests and the production build:
+Run the detector tests and the production build:
 
 ```powershell
 Set-Location C:\Users\C\Pictures\BuildingLocator\forgh
@@ -287,23 +149,9 @@ npm.cmd test
 npm.cmd run build
 ```
 
-The queue-control tests also cover persistent start state, sequential
-save-before-next ordering, continuing after a recorded error, recovery of
-expired analysis leases, quota recovery at UTC rollover, and exclusion of
-completed records from automatic retries.
-
-The tests cover an ordinary house, a subdivision house, warehouse, industrial
-building, agricultural building, tree canopy, cleared lot, insufficient
-imagery, nearby residential context, missing LiDAR support, and conflicting
-direct residential tags. They validate the approval gate with fixed reports;
-they do not simulate a live vision model or prove real-world model accuracy.
-After Cloudflare bindings and the model license are configured, scan labeled
-known examples and inspect each report before relying on approvals.
-
-Queue and Cron tests exercise owner start/stop state, browserless scheduled
-processing, inactive queues, sequential subsequent invocations, D1 result
-commit ordering, recorded errors, duplicate lock rejection, expired-lease
-recovery, quota pause, and next-day recovery.
+The scanner detector tests exercise roof-like geometry, vegetation rejection,
+and diagnostic reporting with synthetic point data. They do not prove
+real-world building detection accuracy.
 
 ## Diagnostics and privacy
 
@@ -315,13 +163,11 @@ the app reports those limits.
 
 Candidate metadata (coordinates, approximate footprint, score, return counts,
 classification counts, and evidence summary) is shared through Firebase
-Realtime Database after every visitor's scan and copied to the D1 investigation
-queue. Investigation reports are stored in D1; bounded NAIP imagery is
-requested for visual review but raw image bytes and LiDAR points are not stored.
-Raw LiDAR points and full scan rectangles are not stored in Firebase. All
-visitors can read candidate records. Only AI-approved records appear as normal
-map markers. Scans are authenticated with Firebase Anonymous
-Authentication by default; each signed-in identity can write only its own
+Realtime Database after each visitor's scan. Raw LiDAR points and full scan
+rectangles are not stored. All visitors can read candidate records, and
+heuristic candidates are shown immediately as unverified map markers. Scans
+are authenticated with Firebase Anonymous Authentication by default; each
+signed-in identity can write only its own
 `scanCandidates/{uid}` records. The configured owner UID alone can write
 `candidateReviews`, which stores removal/restoration decisions. Removed
 locations are matched to new detections within approximately 8 metres and
@@ -329,12 +175,9 @@ remain suppressed until restored in the Owner review panel. Candidate scoring
 and spatial matching are heuristic; a nearby, distinct structure may also be
 suppressed, so review restored markers carefully.
 
-The investigation panel has an owner-only **Clear all investigations and
-markers** action. After confirmation, it stops the queue, marks currently known
-candidate locations removed in Firebase so they stay hidden and are not
-re-queued, and deletes all D1 investigation and attempt-history rows. Original
-Firebase scan evidence and today's AI usage accounting are retained. The owner
-must be signed in and confirm the action in the deployed site.
+The owner can remove individual shared markers; removed locations stay
+suppressed when later scans find them. Existing investigation records are
+preserved as historical data and are not processed by the updated Cron Worker.
 
 Before deploying, apply the rules in `database.rules.json` to the Realtime
 Database. If the project already has other data/rules, merge both the
@@ -360,11 +203,11 @@ URL.
 
 ## Dependencies
 
-- **Cloudflare Pages Functions and D1** — same-origin authenticated API and
-  durable queue/report storage; provisioned through the Pages dashboard.
-- **Cloudflare Workers AI** — server-side vision inference through the `AI`
-  binding. The queue-processing endpoint is restricted to the configured
-  owner. No AI SDK or npm package is added.
+- **Firebase Realtime Database and Authentication** — shared heuristic
+  candidate markers and owner-only remove/restore controls.
+- **Cloudflare Pages** — static website hosting. The current marker workflow
+  does not call D1 or Workers AI; legacy investigation history is retained but
+  dormant.
 - **USGS/USDA NAIP ImageServer and OpenStreetMap Overpass API** — bounded aerial
   image exports and optional public footprint/context evidence. No map tiles
   are scraped for AI.

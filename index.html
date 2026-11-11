@@ -73,61 +73,21 @@
       <section class="candidate-panel" aria-labelledby="candidate-title">
         <div class="candidate-heading">
           <div>
-            <p class="eyebrow">INVESTIGATION APPROVED</p>
-            <h2 id="candidate-title">No approved structures yet</h2>
+            <p class="eyebrow">LIDAR DETECTIONS</p>
+            <h2 id="candidate-title">No candidate detections yet</h2>
           </div>
-          <p class="candidate-note">Only candidates approved by the conservative AI-plus-LiDAR review appear here or as map markers.</p>
+          <p class="candidate-note">LiDAR heuristic candidates are shown immediately. They are leads to review, not confirmed buildings.</p>
         </div>
         <div id="candidate-summary" class="candidate-summary"></div>
         <div id="candidate-list" class="candidate-list">
-          <p class="muted">Detected candidates remain hidden from the normal map until investigation is complete and approved.</p>
+          <p class="muted">Run a scan to find and map LiDAR candidate detections.</p>
         </div>
-      </section>
-
-      <section class="investigation-panel" aria-labelledby="investigation-title">
-        <div class="investigation-heading">
-          <div>
-            <p class="eyebrow">PERSISTENT REVIEW QUEUE</p>
-            <h2 id="investigation-title">Candidate investigations</h2>
-          </div>
-          <span id="investigation-service-state" class="investigation-state" role="status">Connecting…</span>
-        </div>
-        <p id="investigation-status" class="investigation-note" aria-live="polite">
-          Candidates are queued for sequential review. Pending work remains stored between visits.
-        </p>
-        <button id="start-investigation-queue" class="primary-button" type="button" hidden>
-          Start investigation queue
-        </button>
-        <button id="stop-investigation-queue" class="secondary-button" type="button" hidden>
-          Stop investigation queue
-        </button>
-        <button id="clear-all-investigations" class="danger-button" type="button" disabled>
-          Clear all investigations and markers
-        </button>
-        <p id="clear-all-help" class="investigation-note">
-          Sign in with the owner Google account in the Owner review panel to clear investigations and map markers.
-        </p>
-        <div id="investigation-counts" class="investigation-counts" aria-live="polite"></div>
-        <p id="investigation-cron-status" class="investigation-note" aria-live="polite">
-          Scheduled Worker status is loading.
-        </p>
-        <p id="investigation-quota" class="investigation-quota">Daily AI budget status is loading.</p>
-        <div id="investigation-error" class="investigation-error" role="alert" hidden></div>
-        <div id="investigation-history" class="investigation-history">
-          <p class="muted">No investigation records are loaded yet.</p>
-        </div>
-        <button id="load-more-investigations" class="secondary-button" type="button" hidden>
-          Load older investigations
-        </button>
-        <p class="investigation-disclaimer">
-          Imagery is requested as a bounded USGS/USDA NAIP image export, not scraped map tiles. Missing imagery or missing public map tags are not proof that a building is absent or non-residential. LiDAR vertical units and datum are unverified. A structure with no useful LiDAR roof or wall returns cannot be reliably detected.
-        </p>
       </section>
 
       <details id="owner-panel" class="owner-panel">
         <summary>Owner review panel</summary>
         <p class="owner-panel-note">
-          Every visitor's scan saves candidate evidence to shared storage. Only AI-approved investigations can appear as normal map markers. Sign in with the configured owner Google account to remove or restore approved markers; removed locations stay suppressed when a later scan finds them again.
+          Candidate detections are shared with other visitors. Sign in with the configured owner Google account to remove or restore markers; removed locations stay suppressed when a later scan finds them again.
         </p>
         <div class="owner-panel-actions">
           <button id="owner-sign-in" class="secondary-button" type="button">Sign in with Google</button>

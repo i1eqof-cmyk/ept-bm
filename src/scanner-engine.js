@@ -677,23 +677,47 @@ function scoreCandidate(group) {
 }
 
 export function detectCandidates(tiles, geographicBounds) {
-  const groups = groupCandidateCells(pointGrid(tiles));
+  const cells = pointGrid(tiles);
+  const groups = groupCandidateCells(cells);
   const centerLongitude = (geographicBounds.west + geographicBounds.east) / 2;
   const centerLatitude = (geographicBounds.south + geographicBounds.north) / 2;
   const longitudeScale =
     111_319.49079327358 * Math.cos((centerLatitude * Math.PI) / 180);
   const candidates = [];
+  const rejectedGroups = {
+    belowMinimumFootprint: 0,
+    belowMinimumPointCount: 0,
+    insufficientGroundSupport: 0,
+    insufficientPlanarity: 0,
+    excessiveVegetation: 0,
+  };
+  let class6Groups = 0;
+  let roofGeometryGroups = 0;
 
   for (const group of groups) {
     const metrics = scoreCandidate(group);
     const class6Candidate = metrics.class6Count >= 10 && group.length >= 2;
+    if (class6Candidate) class6Groups += 1;
+    const gates = {
+      belowMinimumFootprint: metrics.dimensions.areaSquareMeters >= 25,
+      belowMinimumPointCount: metrics.pointCount >= 40,
+      insufficientGroundSupport: metrics.groundCoverage >= 0.35,
+      insufficientPlanarity: metrics.planarCoverage >= 0.4,
+      excessiveVegetation: metrics.vegetationShare < 0.7,
+    };
     const roofCandidate =
-      metrics.dimensions.areaSquareMeters >= 25 &&
-      metrics.pointCount >= 40 &&
-      metrics.groundCoverage >= 0.35 &&
-      metrics.planarCoverage >= 0.4 &&
-      metrics.vegetationShare < 0.7;
-    if (!class6Candidate && !roofCandidate) continue;
+      gates.belowMinimumFootprint &&
+      gates.belowMinimumPointCount &&
+      gates.insufficientGroundSupport &&
+      gates.insufficientPlanarity &&
+      gates.excessiveVegetation;
+    if (roofCandidate) roofGeometryGroups += 1;
+    if (!class6Candidate && !roofCandidate) {
+      for (const [gate, passed] of Object.entries(gates)) {
+        if (!passed) rejectedGroups[gate] += 1;
+      }
+      continue;
+    }
     metrics.evidence.unshift(
       class6Candidate
         ? `Candidate gate: ≥10 Class 6 returns across at least 2 connected cells.`
@@ -730,9 +754,37 @@ export function detectCandidates(tiles, geographicBounds) {
   }
 
   candidates.sort((a, b) => b.score - a.score);
+  let pointCount = 0;
+  const classificationCounts = { 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, other: 0 };
+  for (const cell of cells.values()) {
+    pointCount += cell.count;
+    classificationCounts[2] += cell.groundCount;
+    classificationCounts[3] += cell.class3Count;
+    classificationCounts[4] += cell.class4Count;
+    classificationCounts[5] += cell.class5Count;
+    classificationCounts[6] += cell.class6Count;
+    classificationCounts.other += cell.otherCount;
+  }
+  const nonGroundCells = [...cells.values()].filter((cell) => cell.nonGroundCount > 0);
+  const elevatedCells = nonGroundCells.filter((cell) => cell.elevated);
+  const planarElevatedCells = elevatedCells.filter((cell) => cell.planar);
   return {
     candidates,
     totalCandidateCount: candidates.length,
+    diagnostics: {
+      pointCount,
+      classificationCounts,
+      gridCellCount: cells.size,
+      nonGroundCellCount: nonGroundCells.length,
+      groundSupportedCellCount: nonGroundCells.filter((cell) => cell.localGroundZ !== null).length,
+      elevatedCellCount: elevatedCells.length,
+      planarElevatedCellCount: planarElevatedCells.length,
+      eligibleCellCount: nonGroundCells.filter((cell) => cell.eligible).length,
+      connectedGroupCount: groups.length,
+      class6GroupCount: class6Groups,
+      roofGeometryGroupCount: roofGeometryGroups,
+      rejectedGroups,
+    },
   };
 }
 
